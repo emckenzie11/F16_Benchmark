@@ -9,7 +9,7 @@ from numpy.fft import rfft, irfft, rfftfreq
 os.system('cls' if os.name == 'nt' else 'clear')
 
 # ----------- USER CONFIGURATION -----------
-levels_to_compute = [7]  # Levels to compute RFS
+levels_to_compute = [5]  # Levels to compute RFS
 location_i = 2  # DOF i
 location_j = 3  # DOF j
 
