@@ -9,6 +9,7 @@ See 'Nonlinear ground vibration identification of an F-16 aircraft Part I – Fa
 
 See https://www.nonlinearbenchmark.org/benchmarks/f-16-gvt for the training data.
 
+See 'F16Benchmark.pdf' for further details on the training data and the aim of this analysis.
 
 
 
