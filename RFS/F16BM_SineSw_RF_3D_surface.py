@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 from scipy.signal import butter, filtfilt
+from scipy.interpolate import griddata
 from numpy.fft import rfft, irfft, rfftfreq
 
 # Clear terminal
@@ -132,21 +133,47 @@ for level in levels_to_compute:
 
 # ---------------------- 3D Plotting ----------------------
 
-def plot_3d_restoring_force_surface(level, title_suffix=""):
-    """Plot 3D restoring force surface for a single level."""
+def plot_3d_restoring_force_surface(level, title_suffix="", grid_size=50):
+    """Plot 3D restoring force surface for a single level using surface plot."""
     rel_disp = rfs_data[level]['rel_disp']
     rel_vel = rfs_data[level]['rel_vel']
     R = rfs_data[level]['restoring_force']
     
-    print(f"Level {level}: Plotting {len(rel_disp)} points")
+    print(f"Level {level}: Converting {len(rel_disp)} points to surface plot")
     
     # Create 3D plot
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
     
-    # Create scatter plot with color mapping based on restoring force
-    scatter = ax.scatter(rel_disp, rel_vel, R, c=R, cmap='viridis', 
-                        s=20, alpha=0.6)
+    # Create regular grid for surface plot
+    x_min, x_max = rel_disp.min(), rel_disp.max()
+    y_min, y_max = rel_vel.min(), rel_vel.max()
+    
+    # Create grid
+    xi = np.linspace(x_min, x_max, grid_size)
+    yi = np.linspace(y_min, y_max, grid_size)
+    X, Y = np.meshgrid(xi, yi)
+    
+    # Interpolate R values onto the grid using griddata
+    from scipy.interpolate import griddata
+    
+    # Stack the coordinates
+    points = np.column_stack((rel_disp, rel_vel))
+    
+    # Interpolate using cubic method (fallback to linear if cubic fails)
+    try:
+        Z = griddata(points, R, (X, Y), method='cubic', fill_value=np.nan)
+        # Fill any remaining NaN values with linear interpolation
+        if np.any(np.isnan(Z)):
+            Z_linear = griddata(points, R, (X, Y), method='linear', fill_value=np.nan)
+            Z = np.where(np.isnan(Z), Z_linear, Z)
+    except:
+        # If cubic fails, use linear interpolation
+        Z = griddata(points, R, (X, Y), method='linear', fill_value=np.nan)
+    
+    # Create surface plot
+    surface = ax.plot_surface(X, Y, Z, cmap='viridis', alpha=0.8, 
+                             linewidth=0, antialiased=True, edgecolors='none')
     
     # Labels and title
     ax.set_xlabel('Relative Displacement [m]')
@@ -155,7 +182,7 @@ def plot_3d_restoring_force_surface(level, title_suffix=""):
     ax.set_title(f'Restoring Force Surface - Level {level}{title_suffix}')
     
     # Add colorbar
-    cbar = plt.colorbar(scatter, ax=ax, shrink=0.8, aspect=20)
+    cbar = plt.colorbar(surface, ax=ax, shrink=0.8, aspect=20)
     cbar.set_label('-Acceleration [m/s²]')
     
     # Format axes with scientific notation
