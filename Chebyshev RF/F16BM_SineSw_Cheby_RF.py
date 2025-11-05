@@ -9,7 +9,8 @@ from numpy.fft import rfft, irfft, rfftfreq
 os.system('cls' if os.name == 'nt' else 'clear')
 
 # ----------- USER CONFIGURATION -----------
-levels_to_compute = [5]  # Levels to compute RFS
+training_level = [3]  # Level to be trained on
+validation_level = [2] # Levels to be validated on
 location_i = 2  # DOF i
 location_j = 3  # DOF j
 
@@ -33,15 +34,22 @@ m_eff = 1.0
 poly_order = 3
 
 # ----------- LOAD DATA -----------
-data_dict = {
+training_data = {
     1: pd.read_csv('BenchmarkData/F16Data_SineSw_Level1.csv'),
     3: pd.read_csv('BenchmarkData/F16Data_SineSw_Level3.csv'),
     5: pd.read_csv('BenchmarkData/F16Data_SineSw_Level5.csv'),
     7: pd.read_csv('BenchmarkData/F16Data_SineSw_Level7.csv')
 }
 
+validation_data = {
+    2: pd.read_csv('BenchmarkData/F16Data_SineSw_Level2_Validation.csv'),
+    4: pd.read_csv('BenchmarkData/F16Data_SineSw_Level4_Validation.csv'),
+    6: pd.read_csv('BenchmarkData/F16Data_SineSw_Level6_Validation.csv'),
+}
+
 # Keep only the levels requested
-data_dict = {lvl: data_dict[lvl] for lvl in levels_to_compute}
+training_data = {level: training_data[level] for level in training_level}
+validation_data = {level: validation_data[level] for level in validation_level}
 
 # ----------- HELPER FUNCTIONS -----------
 def bandpass_filter(signal, lowcut, highcut, fs, order=4):
@@ -96,16 +104,14 @@ def compute_restoring_force(accel_i_bp, m_eff=1.0):
     return -m_eff * accel_i_bp
 
 # ----------- PROCESS DATA -----------
-for level in levels_to_compute:
-    print(f"Processing Level {level}...")
-    data = data_dict[level]
-
-    # Extract acceleration signals
-    accel_i = data[f'Acceleration{location_i}'].to_numpy()
-    accel_j = data[f'Acceleration{location_j}'].to_numpy()
+# Process training data for fitting Chebychev polynomial to (singular level)
+# Process validation data for error calculation against generated model
+for level in training_level:
+    # Extract acceleration signals from raw data
+    accel_i = training_data[level][f'Acceleration{location_i}'].to_numpy()
+    accel_j = training_data[level][f'Acceleration{location_j}'].to_numpy()
 
     # Apply bandpass filter to isolate the target mode
-    print(f"Level {level} - Applying bandpass filter ({freq_low}-{freq_high} Hz)...")
     a_i_bp = bandpass_filter(accel_i, freq_low, freq_high, fs)
     a_j_bp = bandpass_filter(accel_j, freq_low, freq_high, fs)
 
@@ -114,6 +120,31 @@ for level in levels_to_compute:
 
     # Compute restoring force
     f_rest = compute_restoring_force(a_i_bp, m_eff)
+
+    # Add processed data directly to the training_data dictionary
+    training_data[level]['x_rel'] = x_rel
+    training_data[level]['v_rel'] = v_rel
+    training_data[level]['f_rest'] = f_rest
+
+for level in validation_level:
+    # Extract acceleration signals from raw data
+    accel_i = validation_data[level][f'Acceleration{location_i}'].to_numpy()
+    accel_j = validation_data[level][f'Acceleration{location_j}'].to_numpy()
+
+    # Apply bandpass filter to isolate the target mode
+    a_i_bp = bandpass_filter(accel_i, freq_low, freq_high, fs)
+    a_j_bp = bandpass_filter(accel_j, freq_low, freq_high, fs)
+
+    # Compute relative motion using band-limited FFT integration
+    x_rel, v_rel = compute_relative_motion(a_i_bp, a_j_bp, fs, freq_low, freq_high)
+
+    # Compute restoring force
+    f_rest = compute_restoring_force(a_i_bp, m_eff)
+
+    # Add processed data directly to the validation_data dictionary
+    validation_data[level]['x_rel'] = x_rel
+    validation_data[level]['v_rel'] = v_rel
+    validation_data[level]['f_rest'] = f_rest
 
 # ----------- SCALE RELATIVE STATES TO [-1,1] -----------
 def scale_to_unit_interval(x):
@@ -153,7 +184,6 @@ def build_2d_chebyshev_basis(x, v, order):
 H_poly = build_2d_chebyshev_basis(x_scaled, v_scaled, poly_order)
 
 # ----------- FIT RESTORING FORCE COEFFICIENTS -----------
-
 # Linear least squares: f_rest = H_poly @ alpha
 alpha, residuals, rank, s = np.linalg.lstsq(H_poly, f_rest, rcond=None)
 
@@ -172,9 +202,12 @@ disp_thresh_frac = 0.02   # 2% of max |x_rel|
 vel_thresh_min = 1e-6
 disp_thresh_min = 1e-7
 
-# Calculate adaptive thresholds
-eps_v = max(vel_thresh_frac * np.max(np.abs(v_rel)), vel_thresh_min)
-eps_x = max(disp_thresh_frac * np.max(np.abs(x_rel)), disp_thresh_min)
+# Calculate adaptive thresholds using training data (for consistency)
+v_rel_train = training_data[training_level[0]]['v_rel']
+x_rel_train = training_data[training_level[0]]['x_rel']
+
+eps_v = max(vel_thresh_frac * np.max(np.abs(v_rel_train)), vel_thresh_min)
+eps_x = max(disp_thresh_frac * np.max(np.abs(x_rel_train)), disp_thresh_min)
 
 print("-"*60)
 print(f"Velocity threshold: {eps_v:.6e} m/s ({vel_thresh_frac*100}% of max)")
@@ -182,43 +215,49 @@ print(f"Displacement threshold: {eps_x:.6e} m ({disp_thresh_frac*100}% of max)")
 
 # Create masks for slicing
 # Stiffness slice (R vs displacement): near-zero velocity
-near_zero_vel_mask = np.abs(v_rel) <= eps_v
+vel_mask = np.abs(v_rel) <= eps_v
 # Damping slice (R vs velocity): near-zero displacement  
-near_zero_disp_mask = np.abs(x_rel) <= eps_x
+disp_mask = np.abs(x_rel) <= eps_x
 
 # ----------- VISUALIZE SLICE PLOTS -----------
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-
-# Stiffness plot (Restoring Force vs Displacement)
-ax1.plot(x_rel[near_zero_vel_mask], f_rest[near_zero_vel_mask], 
-         'bo', markersize=3, alpha=0.6, markerfacecolor='none', 
-         markeredgewidth=0.8, label='Measured')
-ax1.plot(x_rel[near_zero_vel_mask], F_pred[near_zero_vel_mask], 
-         'ro', markersize=2, alpha=0.8, label='Chebyshev Fit')
-ax1.set_xlabel('Relative Displacement [m]')
-ax1.set_ylabel('Restoring Force [m/s²]')
-ax1.set_title(f'(a) Stiffness Characteristic - Level {levels_to_compute[0]}')
-ax1.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
-ax1.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
-ax1.grid(True, alpha=0.3)
-ax1.legend()
-
-# Damping plot (Restoring Force vs Velocity)
-ax2.plot(v_rel[near_zero_disp_mask], f_rest[near_zero_disp_mask], 
-         'bo', markersize=3, alpha=0.6, markerfacecolor='none', 
-         markeredgewidth=0.8, label='Measured')
-ax2.plot(v_rel[near_zero_disp_mask], F_pred[near_zero_disp_mask], 
-         'ro', markersize=2, alpha=0.8, label='Chebyshev Fit')
-ax2.set_xlabel('Relative Velocity [m/s]')
-ax2.set_ylabel('Restoring Force [m/s²]')
-ax2.set_title(f'(b) Damping Characteristic - Level {levels_to_compute[0]}')
-ax2.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
-ax2.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
-ax2.grid(True, alpha=0.3)
-ax2.legend()
-
-plt.tight_layout()
-plt.show()
+for level in validation_level:
+    # Retrieve validation data
+    x_rel_val = validation_data[level]['x_rel']
+    v_rel_val = validation_data[level]['v_rel']
+    f_rest_val = validation_data[level]['f_rest']
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Stiffness plot (Restoring Force vs Displacement)
+    ax1.plot(x_rel_val[vel_mask], f_rest_val[vel_mask], 
+             'bo', markersize=3, alpha=0.6, markerfacecolor='none', 
+             markeredgewidth=0.8, label='Validation Dataset (Level {})'.format(level))
+    ax1.plot(x_rel_val[vel_mask], F_pred[vel_mask], 
+             'ro', markersize=2, alpha=0.8, label='Chebyshev Polynomial (Order: {}, Trained on Dataset: Level {})'.format(poly_order, training_level[0]))
+    ax1.set_xlabel('Relative Displacement [m]')
+    ax1.set_ylabel('-Relative Acceleration [m/s²]')
+    ax1.set_title(f'(a) Stiffness Characteristic')
+    ax1.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    ax1.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # Damping plot (Restoring Force vs Velocity)
+    ax2.plot(v_rel_val[disp_mask], f_rest_val[disp_mask], 
+             'bo', markersize=3, alpha=0.6, markerfacecolor='none', 
+             markeredgewidth=0.8, label='Measured')
+    ax2.plot(v_rel_val[disp_mask], F_pred[disp_mask], 
+             'ro', markersize=2, alpha=0.8, label='Chebyshev Polynomial (Order: {}, Trained on Dataset: Level {})'.format(poly_order, training_level[0]))
+    ax2.set_xlabel('Relative Velocity [m/s]')
+    ax2.set_ylabel('-Relative Acceleration [m/s²]')
+    ax2.set_title(f'(b) Damping Characteristic')
+    ax2.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    ax2.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    plt.tight_layout()
+    plt.show()
 
 # ----------- COMPUTE FIT QUALITY -----------
 print("-"*60)
@@ -246,12 +285,12 @@ def rmse(y_true, y_pred):
     mse = np.mean(error**2)   # Mean squared error
     return np.sqrt(mse)       # Root of mean squared error
 
-if np.sum(near_zero_vel_mask) > 1:
-    rmse_stiffness = rmse(f_rest[near_zero_vel_mask], F_pred[near_zero_vel_mask])
+if np.sum(vel_mask) > 1:
+    rmse_stiffness = rmse(f_rest[vel_mask], F_pred[vel_mask])
     print(f"Stiffness slice RMSE = {rmse_stiffness:.4f}")
 
-if np.sum(near_zero_disp_mask) > 1:
-    rmse_damping = rmse(f_rest[near_zero_disp_mask], F_pred[near_zero_disp_mask])
+if np.sum(disp_mask) > 1:
+    rmse_damping = rmse(f_rest[disp_mask], F_pred[disp_mask])
     print(f"Damping slice RMSE = {rmse_damping:.4f}")
 
 # Calculate combined overall RMSE
