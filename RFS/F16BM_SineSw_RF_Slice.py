@@ -9,10 +9,9 @@ from numpy.fft import rfft, irfft, rfftfreq
 os.system('cls' if os.name == 'nt' else 'clear')
 
 # ----------- USER CONFIGURATION -----------
-# Plot configuration
-levels_to_compute = [1, 3, 5, 7]  # Levels to compute RFS (Options: 1, 3, 5, 7)
-location_i = 2  # DOF i (location where acceleration is measured)
-location_j = 3  # DOF j (location across the nonlinear connection)
+training_level = [1, 3, 5, 7]  # Levels to compute RFS (Options: 1, 3, 5, 7)
+location_i = 2  # DOF i
+location_j = 3  # DOF j
 
 # Data parameters
 fs = 400              # Sampling frequency in Hz
@@ -23,25 +22,29 @@ target_freq = 7.3     # Target mode frequency [Hz]
 freq_low = 6.8        # Lower frequency bound [Hz]
 freq_high = 8.6       # Upper frequency bound [Hz]
 
+# Effective mass
+m_eff = 1.0
+
 # Thresholds - determines thickness of RFS slices
-vel_thresh_frac = 1     # % of max |v_rel|
-disp_thresh_frac = 1    # % of max |x_rel|
+vel_thresh_frac = 0.01    # % of max |v_rel|
+disp_thresh_frac = 0.01   # % of max |x_rel|
 
 # Minimum floors in case of tiny signals
 vel_thresh_min = 1e-6
 disp_thresh_min = 1e-7
 
-# Effective mass (normalized).
-m_eff = 1.0
-
-# Input CSVs
-data_dict = {
+# ----------- LOAD DATA -----------
+training_data = {
     1: pd.read_csv('BenchmarkData/F16Data_SineSw_Level1.csv'),
     3: pd.read_csv('BenchmarkData/F16Data_SineSw_Level3.csv'),
     5: pd.read_csv('BenchmarkData/F16Data_SineSw_Level5.csv'),
     7: pd.read_csv('BenchmarkData/F16Data_SineSw_Level7.csv')
 }
-# ------------------------------------------
+    
+# Keep only the levels requested
+training_data = {level: training_data[level] for level in training_level}
+
+# ----------- HELPER FUNCTIONS -----------
 
 def bandpass_filter(signal, lowcut, highcut, fs, order=4):
     """
@@ -86,129 +89,119 @@ def compute_relative_motion(accel_i, accel_j, fs, f_lo, f_hi):
     x_rel = band_limited_integrate_fft(a_rel, fs, f_lo, f_hi, order=2)
     return x_rel, v_rel
 
-def compute_restoring_force(accel_i_bp, m_eff=1.0):
+def compute_restoring_force(F_i_bp, accel_i_bp, m_eff=1.0):
     """
     Restoring force proxy using band-passed acceleration at DOF i:
-      R(t) ≈ -m_eff * a_i_bp
-    If you have measured input force F_i, prefer R = F_i_bp - m_eff * a_i_bp.
+      R(t) ≈ F_i_bp - m_eff * a_i_bp.
     """
-    return -m_eff * accel_i_bp
+    return F_i_bp - m_eff * accel_i_bp
+
+# ----------- PROCESS DATA -----------
+# Store results for all levels
+rfs_data = {}
+
+for level in training_level:
+    # Extract acceleration signals from raw data
+    accel_i = training_data[level][f'Acceleration{location_i}'].to_numpy()
+    accel_j = training_data[level][f'Acceleration{location_j}'].to_numpy()
+    force_input = training_data[level][f'Force'].to_numpy()
+
+    # Apply bandpass filter to isolate the target mode
+    a_i_bp = bandpass_filter(accel_i, freq_low, freq_high, fs)
+    a_j_bp = bandpass_filter(accel_j, freq_low, freq_high, fs)
+    F_i_bp = bandpass_filter(force_input, freq_low, freq_high, fs)
+
+    # Compute relative motion using band-limited FFT integration
+    x_rel, v_rel = compute_relative_motion(a_i_bp, a_j_bp, fs, freq_low, freq_high)
+
+    # Compute restoring force
+    f_rest = compute_restoring_force(F_i_bp, a_i_bp, m_eff)
+
+    # Add processed data directly to the training_data dictionary
+    training_data[level]['x_rel'] = x_rel
+    training_data[level]['v_rel'] = v_rel
+    training_data[level]['f_rest'] = f_rest
+
+# ----------- SLICE ANALYSIS WITH 2% THRESHOLD -----------
+# Thresholds for slicing (2% of maximum values)
+print("-"*60)
+print(f"Velocity threshold: {vel_thresh_frac*100}% of max |v_rel|")
+print(f"Displacement threshold: {disp_thresh_frac*100}% of max |x_rel|")
 
 # Store results for all levels
 rfs_data = {}
 
-for level in levels_to_compute:
-    data = data_dict[level]
+for level in training_level:
+    # Get processed data
+    x_rel = training_data[level]['x_rel']
+    v_rel = training_data[level]['v_rel']
+    f_rest = training_data[level]['f_rest']
 
-    # Extract acceleration signals (assumed in m/s^2)
-    accel_i_raw = data[f'Acceleration{location_i}'].to_numpy()
-    accel_j_raw = data[f'Acceleration{location_j}'].to_numpy()
+    # Calculate adaptive thresholds
+    eps_v = max(vel_thresh_frac * np.max(np.abs(v_rel)), vel_thresh_min)
+    eps_x = max(disp_thresh_frac * np.max(np.abs(x_rel)), disp_thresh_min)
 
-    # Apply bandpass filter to isolate the target mode (for consistency across all signals)
-    print(f"Level {level} - Applying bandpass filter ({freq_low}-{freq_high} Hz)...")
-    accel_i_bp = bandpass_filter(accel_i_raw, freq_low, freq_high, fs)
-    accel_j_bp = bandpass_filter(accel_j_raw, freq_low, freq_high, fs)
+    print(f"Level {level} - Velocity threshold: {eps_v:.6e} m/s")
+    print(f"Level {level} - Displacement threshold: {eps_x:.6e} m")
 
-    # Relative motion (subtract first, then integrate band-limited)  <-- Change 2
-    rel_disp, rel_vel = compute_relative_motion(accel_i_bp, accel_j_bp, fs, freq_low, freq_high)
-
-    # Restoring force proxy (use band-passed a_i; scale by mass if known)
-    restoring_force = compute_restoring_force(accel_i_bp, m_eff=m_eff)
-
-    # Adaptive, level-dependent thresholds 
-    eps_v = max(vel_thresh_frac * np.max(np.abs(rel_vel)), vel_thresh_min)
-    eps_x = max(disp_thresh_frac * np.max(np.abs(rel_disp)), disp_thresh_min)
-
-    # Masks:
-    # - Stiffness slice (R vs x): use near-zero velocity
-    near_zero_vel_mask = np.abs(rel_vel) <= eps_v
-    # - Damping slice (R vs v): use near-zero displacement
-    near_zero_disp_mask = np.abs(rel_disp) <= eps_x
+    # Create masks for slicing
+    # Stiffness slice (R vs displacement): near-zero velocity
+    near_zero_vel_mask = np.abs(v_rel) <= eps_v
+    # Damping slice (R vs velocity): near-zero displacement  
+    near_zero_disp_mask = np.abs(x_rel) <= eps_x
 
     # Store results
     rfs_data[level] = {
-        'rel_disp': rel_disp,
-        'rel_vel': rel_vel,
-        'restoring_force': restoring_force,
+        'x_rel': x_rel,
+        'v_rel': v_rel,
+        'f_rest': f_rest,
         'vel_mask': near_zero_vel_mask,   # used for stiffness slice
         'disp_mask': near_zero_disp_mask   # used for damping slice
     }
 
-# ---------------------- Plotting ----------------------
+# ----------- VISUALIZE SLICE PLOTS -----------
+figures = []  # Store all figures to show them at once
 
-def plot_single_level(ax_stiff, ax_damp, level, title_prefix=('a', 'b')):
-    """Plot a single level's stiffness and damping characteristics."""
-    rel_disp = rfs_data[level]['rel_disp']
-    rel_vel = rfs_data[level]['rel_vel']
-    R = rfs_data[level]['restoring_force']
-    mask_stiff = rfs_data[level]['vel_mask']
-    mask_damp = rfs_data[level]['disp_mask']
-
-    # Stiffness plot (R vs displacement)
-    ax_stiff.plot(rel_disp[mask_stiff], R[mask_stiff],
-                  'o', color='black', markersize=3, alpha=0.6,
-                  markerfacecolor='none', markeredgewidth=0.5)
-    ax_stiff.set_xlabel('Relative Displacement [m]')
-    ax_stiff.set_ylabel('-Acceleration [m/s²]')
-    ax_stiff.set_title(f'({title_prefix[0]}) Level {level} - Stiffness')
-    ax_stiff.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
-    ax_stiff.grid(False)
-
-    # Damping plot (R vs velocity)
-    ax_damp.plot(rel_vel[mask_damp], R[mask_damp],
-                 'o', color='black', markersize=3, alpha=0.6,
-                 markerfacecolor='none', markeredgewidth=0.5)
-    ax_damp.set_xlabel('Relative Velocity [m/s]')
-    ax_damp.set_ylabel('-Acceleration [m/s²]')
-    ax_damp.set_title(f'({title_prefix[1]}) Level {level} - Damping')
-    ax_damp.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
-    ax_damp.grid(False)
-
-# Dynamic plotting based on number of levels
-n_levels = len(levels_to_compute)
-figures = []  # Store all figures to show them simultaneously
-
-if n_levels == 1:
-    # Single level: 1 figure with 1x2 subplots
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    plot_single_level(axes[0], axes[1], levels_to_compute[0], title_prefix=('a', 'b'))
-    plt.tight_layout()
-    figures.append(fig)
-
-elif n_levels == 2:
-    # Two levels: 1 figure with 2x2 subplots
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    plot_single_level(axes[0, 0], axes[0, 1], levels_to_compute[0], title_prefix=('a', 'b'))
-    plot_single_level(axes[1, 0], axes[1, 1], levels_to_compute[1], title_prefix=('c', 'd'))
-    plt.tight_layout()
-    figures.append(fig)
-
-else:
-    # Multiple levels: split into figures with max 2 levels per figure
-    alphabet = 'abcdefghijklmnopqrstuvwxyz'
-    title_idx = 0
+for level in training_level:
+    # Get data for this level
+    x_rel = rfs_data[level]['x_rel']
+    v_rel = rfs_data[level]['v_rel']
+    f_rest = rfs_data[level]['f_rest']
+    near_zero_vel_mask = rfs_data[level]['vel_mask']
+    near_zero_disp_mask = rfs_data[level]['disp_mask']
     
-    for i in range(0, n_levels, 2):
-        # Determine how many levels for this figure
-        levels_in_fig = levels_to_compute[i:i+2]
-        
-        if len(levels_in_fig) == 1:
-            # Single level in this figure
-            fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-            plot_single_level(axes[0], axes[1], levels_in_fig[0], 
-                            title_prefix=(alphabet[title_idx], alphabet[title_idx+1]))
-            title_idx += 2
-        else:
-            # Two levels in this figure
-            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-            plot_single_level(axes[0, 0], axes[0, 1], levels_in_fig[0], 
-                            title_prefix=(alphabet[title_idx], alphabet[title_idx+1]))
-            plot_single_level(axes[1, 0], axes[1, 1], levels_in_fig[1], 
-                            title_prefix=(alphabet[title_idx+2], alphabet[title_idx+3]))
-            title_idx += 4
-        
-        plt.tight_layout()
-        figures.append(fig)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Stiffness plot (Restoring Force vs Displacement)
+    ax1.plot(x_rel[near_zero_vel_mask], f_rest[near_zero_vel_mask], 
+             'bo', markersize=3, alpha=0.6, markerfacecolor='none', 
+             markeredgewidth=0.8, label='Measured')
+    ax1.set_xlabel('Relative Displacement [m]')
+    ax1.set_ylabel('Restoring Force [N]')
+    ax1.set_title(f'(a) Stiffness Characteristic - Level {level}')
+    ax1.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    ax1.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # Damping plot (Restoring Force vs Velocity)
+    ax2.plot(v_rel[near_zero_disp_mask], f_rest[near_zero_disp_mask], 
+             'bo', markersize=3, alpha=0.6, markerfacecolor='none', 
+             markeredgewidth=0.8, label='Measured')
+    ax2.set_xlabel('Relative Velocity [m/s]')
+    ax2.set_ylabel('Restoring Force [N]')
+    ax2.set_title(f'(b) Damping Characteristic - Level {level}')
+    ax2.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    ax2.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    plt.tight_layout()
+    figures.append(fig)
 
-# Show all figures simultaneously
+# Show all figures at once
 plt.show()
+
+print("-"*60)
+print("ANALYSIS COMPLETE")
+print("-"*60)

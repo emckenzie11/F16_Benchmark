@@ -52,6 +52,14 @@ training_data = {level: training_data[level] for level in training_level}
 validation_data = {level: validation_data[level] for level in validation_level}
 
 # ----------- HELPER FUNCTIONS -----------
+def peak_and_rms(f):
+    """
+    Compute the peak and RMS values of a excitation signal.
+    """
+    A_peak = np.max(np.abs(f))
+    A_rms = np.sqrt(np.mean(f**2))
+    return A_peak, A_rms
+
 def bandpass_filter(signal, lowcut, highcut, fs, order=4):
     """
     Apply a bandpass Butterworth filter to isolate a specific frequency band.
@@ -110,6 +118,7 @@ for level in training_level:
     # Extract acceleration signals from raw data
     accel_i = training_data[level][f'Acceleration{location_i}'].to_numpy()
     accel_j = training_data[level][f'Acceleration{location_j}'].to_numpy()
+    force_input = training_data[level][f'Force'].to_numpy()
 
     # Apply bandpass filter to isolate the target mode
     a_i_bp = bandpass_filter(accel_i, freq_low, freq_high, fs)
@@ -120,16 +129,22 @@ for level in training_level:
 
     # Compute restoring force
     f_rest = compute_restoring_force(a_i_bp, m_eff)
+
+    # Compute peak and RMS values
+    A_peak, A_rms = peak_and_rms(force_input)
 
     # Add processed data directly to the training_data dictionary
     training_data[level]['x_rel'] = x_rel
     training_data[level]['v_rel'] = v_rel
     training_data[level]['f_rest'] = f_rest
+    training_data[level]['A_peak'] = A_peak
+    training_data[level]['A_rms'] = A_rms
 
 for level in validation_level:
     # Extract acceleration signals from raw data
     accel_i = validation_data[level][f'Acceleration{location_i}'].to_numpy()
     accel_j = validation_data[level][f'Acceleration{location_j}'].to_numpy()
+    force_input = validation_data[level][f'Force'].to_numpy()
 
     # Apply bandpass filter to isolate the target mode
     a_i_bp = bandpass_filter(accel_i, freq_low, freq_high, fs)
@@ -141,10 +156,15 @@ for level in validation_level:
     # Compute restoring force
     f_rest = compute_restoring_force(a_i_bp, m_eff)
 
+    # Compute peak and RMS values
+    A_peak, A_rms = peak_and_rms(force_input)
+
     # Add processed data directly to the validation_data dictionary
     validation_data[level]['x_rel'] = x_rel
     validation_data[level]['v_rel'] = v_rel
     validation_data[level]['f_rest'] = f_rest
+    validation_data[level]['A_peak'] = A_peak
+    validation_data[level]['A_rms'] = A_rms
 
 # ----------- SCALE RELATIVE STATES TO [-1,1] -----------
 def scale_to_unit_interval(x):
