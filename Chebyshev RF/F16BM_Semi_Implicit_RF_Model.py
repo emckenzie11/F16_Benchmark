@@ -19,10 +19,9 @@ freq_low = 6.8
 freq_high = 8.6
 
 m_eff = 1.0
-poly_order = 3  # Chebyshev order (1..poly_order used)
-# ------------------------------------------------
+poly_order = 3  # Chebyshev order 
 
-# --------- I/O: adjust file paths if needed ----------
+# --------- Load Files ----------
 training_data = {
     1: pd.read_csv('BenchmarkData/F16Data_SineSw_Level1.csv'),
     3: pd.read_csv('BenchmarkData/F16Data_SineSw_Level3.csv'),
@@ -39,7 +38,7 @@ validation_data = {
 training_data = {lvl: training_data[lvl] for lvl in training_level}
 validation_data = {lvl: validation_data[lvl] for lvl in validation_level}
 
-# --------------- HELPERS ----------------
+# --------------- HELPERS FOR RESTORING FORCE COMPUTATION ----------------
 def bandpass_filter(signal, lowcut, highcut, fs, order=4):
     nyq = 0.5 * fs
     low = lowcut / nyq
@@ -73,16 +72,26 @@ def compute_restoring_force_from_accel(a_i_bp, m_eff=1.0):
     # R(t) = - m * a(t)  (restoring force proxy)
     return -m_eff * a_i_bp
 
-def scale_to_unit_interval(x):
+# --------------- HELPERS FOR RESTORING FORCE PREDICTION ----------------
+def compute_scaling_factors(x):
+    """
+    Compute scaling factors to map x to [-1,1] using x_scaled = s_x * x + b_x
+    Returns s_x, b_x such that:
+    - min(x) -> -1
+    - max(x) -> +1
+    """
     x_min = np.min(x)
     x_max = np.max(x)
     if x_max == x_min:
         # avoid div by zero if constant signal
-        return np.zeros_like(x), x_min, x_max
-    x_scaled = 2.0 * (x - x_min) / (x_max - x_min) - 1.0
-    return x_scaled, x_min, x_max
+        return 0.0, 0.0, np.zeros_like(x)
+    
+    s_x = 2.0 / (x_max - x_min)
+    b_x = -(x_max + x_min) / (x_max - x_min)
+    
+    x_scaled = s_x * x + b_x
+    return s_x, b_x, x_scaled
 
-# Chebyshev 1D basis (T1..Tn) for array x
 def chebyshev_basis(x, order):
     N = len(x)
     basis = np.zeros((N, order))
@@ -105,22 +114,23 @@ def build_2d_chebyshev_basis(x, v, order):
     H_poly = np.stack(basis_list, axis=1)  # shape (N, order**2)
     return H_poly
 
-# predict R for scalar arrays x and v using fitted alpha
-def predict_restoring_force(x, v, alpha, x_min, x_max, v_min, v_max, poly_order):
+def predict_restoring_force(x, v, alpha, s_x, b_x, s_v, b_v, poly_order):
+    """
+    Predict restoring force using scaling factors
+    x_scaled = s_x * x + b_x
+    v_scaled = s_v * v + b_v
+    """
     # Convert to arrays (ensures length)
     x = np.atleast_1d(x)
     v = np.atleast_1d(v)
 
-    # Scale to [-1,1]
-    if x_max == x_min:
-        x_scaled = np.zeros_like(x)
-    else:
-        x_scaled = 2.0 * (x - x_min) / (x_max - x_min) - 1.0
-
-    if v_max == v_min:
-        v_scaled = np.zeros_like(v)
-    else:
-        v_scaled = 2.0 * (v - v_min) / (v_max - v_min) - 1.0
+    # Scale to [-1,1] using linear transformation
+    x_scaled = s_x * x + b_x
+    v_scaled = s_v * v + b_v
+    
+    # Clamp to [-1,1] to prevent extrapolation issues
+    x_scaled = np.clip(x_scaled, -1.0, 1.0)
+    v_scaled = np.clip(v_scaled, -1.0, 1.0)
 
     # Build basis
     H = build_2d_chebyshev_basis(x_scaled, v_scaled, poly_order)
@@ -133,10 +143,8 @@ def predict_restoring_force(x, v, alpha, x_min, x_max, v_min, v_max, poly_order)
         return R[0]
     return R
 
-
-# simple semi-implicit Euler integrator for simulation
-def simulate_response(force_input, alpha, x_min, x_max, v_min, v_max, poly_order,
-                      dt, m_eff, x0=0.0, v0=0.0, bandpass_force=True):
+def simulate_response(force_input, alpha, s_x, b_x, s_v, b_v, poly_order,
+                      dt, m_eff, x0=0.0, v0=0.0):
     N = len(force_input)
     x = np.zeros(N)
     v = np.zeros(N)
@@ -144,40 +152,36 @@ def simulate_response(force_input, alpha, x_min, x_max, v_min, v_max, poly_order
     x[0] = x0
     v[0] = v0
 
-    # if bandpass_force True, restrict force to modal band (avoid out-of-band energy)
-    if bandpass_force:
-        F_bp = bandpass_filter(force_input, freq_low, freq_high, fs)
-    else:
-        F_bp = force_input.copy()
+    F_bp = bandpass_filter(force_input, freq_low, freq_high, fs)
 
     for k in range(N-1):
-        Rk = predict_restoring_force(x[k], v[k], alpha, x_min, x_max, v_min, v_max, poly_order)
+        Rk = predict_restoring_force(x[k], v[k], alpha, s_x, b_x, s_v, b_v, poly_order)
         ak = (F_bp[k] - Rk) / m_eff
         v[k+1] = v[k] + ak * dt
         x[k+1] = x[k] + v[k+1] * dt    # semi-implicit: use updated velocity
         a[k] = ak
 
-    # final a last sample
-    a[-1] = (F_bp[-1] - predict_restoring_force(x[-1], v[-1], alpha, x_min, x_max, v_min, v_max, poly_order)) / m_eff
+    # last sample
+    a[-1] = (F_bp[-1] - predict_restoring_force(x[-1], v[-1], alpha, s_x, b_x, s_v, b_v, poly_order)) / m_eff
     return x, v, a
 
 # ---------------- PROCESS TRAINING DATA ----------------
-# We'll only use the first (and in your case only) training level to fit Chebyshev
+# Only use the first training level to fit Chebyshev
 train_level = training_level[0]
 
-# get raw arrays
+# Get raw arrays
 accel_i = training_data[train_level][f'Acceleration{location_i}'].to_numpy()
 accel_j = training_data[train_level][f'Acceleration{location_j}'].to_numpy()
 force_input_train = training_data[train_level]['Force'].to_numpy()
 
-# bandpass accelerations (modal isolation)
+# Bandpass accelerations (modal isolation)
 a_i_bp = bandpass_filter(accel_i, freq_low, freq_high, fs)
 a_j_bp = bandpass_filter(accel_j, freq_low, freq_high, fs)
 
-# compute relative states (x_rel, v_rel) via band-limited FFT integration
+# Compute relative states (x_rel, v_rel) via band-limited FFT integration
 x_rel_train, v_rel_train = compute_relative_motion(a_i_bp, a_j_bp, fs, freq_low, freq_high)
 
-# compute restoring force target for training
+# Compute restoring force target for training
 f_rest_train = compute_restoring_force_from_accel(a_i_bp, m_eff)
 
 # Save processed arrays back for reference
@@ -185,17 +189,32 @@ training_data[train_level]['x_rel'] = x_rel_train
 training_data[train_level]['v_rel'] = v_rel_train
 training_data[train_level]['f_rest'] = f_rest_train
 
-# ---------------- SCALE STATES ----------------
-x_scaled_train, x_min, x_max = scale_to_unit_interval(x_rel_train)
-v_scaled_train, v_min, v_max = scale_to_unit_interval(v_rel_train)
+# ---------------- COMPUTE SCALING FACTORS ----------------
+s_x, b_x, x_scaled_train = compute_scaling_factors(x_rel_train)
+s_v, b_v, v_scaled_train = compute_scaling_factors(v_rel_train)
 
 # ---------------- BUILD CHEBYSHEV BASIS & FIT ----------------
 H_poly = build_2d_chebyshev_basis(x_scaled_train, v_scaled_train, poly_order)
 # Fit: f_rest = H_poly @ alpha
 alpha, residuals, rank, s = np.linalg.lstsq(H_poly, f_rest_train, rcond=None)
+
+# Print scaling factors and Chebyshev polynomial with coefficients
 print("-"*60)
 print(f"Fitted {len(alpha)} Chebyshev coefficients (order={poly_order})")
-print("Lstsq residual norm:", np.sum(residuals) if len(residuals)>0 else 0.0)
+print("-"*60)
+print("Scaling factors for portable model:")
+print(f"  s_x = {s_x:12.6e}  (displacement scaling)")
+print(f"  b_x = {b_x:12.6e}  (displacement offset)")
+print(f"  s_v = {s_v:12.6e}  (velocity scaling)")
+print(f"  b_v = {b_v:12.6e}  (velocity offset)")
+print("\nUsage: x_scaled = s_x * x + b_x, v_scaled = s_v * v + b_v")
+print("-"*60)
+
+idx = 0
+for i in range(poly_order):
+    for j in range(poly_order):
+        print(f"alpha[{i},{j}] = {alpha[idx]:12.6e}  (T{i}(x) * T{j}(v))")
+        idx += 1
 
 # Compute training prediction (for diagnostics)
 F_train_pred = H_poly.dot(alpha)
@@ -208,30 +227,30 @@ disp_thresh_min = 1e-7
 
 eps_v = max(vel_thresh_frac * np.max(np.abs(v_rel_train)), vel_thresh_min)
 eps_x = max(disp_thresh_frac * np.max(np.abs(x_rel_train)), disp_thresh_min)
+print("-"*60)
 print(f"Using thresholds: eps_v={eps_v:.3e}, eps_x={eps_x:.3e}")
 
 # ----------------- VALIDATION: process and simulate -----------------
 for val_level in validation_level:
-    # load raw validation signals
+    # Load raw validation signals
     accel_i_val = validation_data[val_level][f'Acceleration{location_i}'].to_numpy()
     accel_j_val = validation_data[val_level][f'Acceleration{location_j}'].to_numpy()
     force_input_val = validation_data[val_level]['Force'].to_numpy()
 
-    # bandpass (same filter as training)
+    # Bandpass (same filter as training)
     a_i_bp_val = bandpass_filter(accel_i_val, freq_low, freq_high, fs)
     a_j_bp_val = bandpass_filter(accel_j_val, freq_low, freq_high, fs)
 
-    # compute measured relative x, v for validation (to compare to sim)
+    # Compute measured relative x, v for validation (to compare to sim)
     x_rel_val, v_rel_val = compute_relative_motion(a_i_bp_val, a_j_bp_val, fs, freq_low, freq_high)
 
-    # compute measured restoring force (target) (shows what was observed)
+    # Compute measured restoring force (to compare to sim)
     f_rest_val = compute_restoring_force_from_accel(a_i_bp_val, m_eff)
 
-    # simulate response using learned Chebyshev model (use bandpassed force in sim)
+    # Simulate response using learned Chebyshev model
     x_sim, v_sim, a_sim = simulate_response(force_input_val, alpha,
-                                           x_min, x_max, v_min, v_max, poly_order,
-                                           dt, m_eff, x0=0.0, v0=0.0,
-                                           bandpass_force=True)
+                                           s_x, b_x, s_v, b_v, poly_order,
+                                           dt, m_eff, x0=0.0, v0=0.0)
 
     # Save into validation_data for plotting convenience
     validation_data[val_level]['x_rel'] = x_rel_val
@@ -241,26 +260,36 @@ for val_level in validation_level:
     validation_data[val_level]['v_sim'] = v_sim
     validation_data[val_level]['a_sim'] = a_sim
 
-    # ---------------- PLOT: time series comparison ----------------
+    # ---------------- PLOT: time series comparison (first 50s only) ----------------
     t = np.arange(len(x_rel_val)) / fs
+    # Limit to first 50 seconds
+    max_samples = int(50 * fs)  # 50 seconds * sampling rate
+    plot_end = min(max_samples, len(x_rel_val))
+    
+    t_plot = t[:plot_end]
+    x_rel_plot = x_rel_val[:plot_end]
+    x_sim_plot = x_sim[:plot_end]
+    v_rel_plot = v_rel_val[:plot_end]
+    v_sim_plot = v_sim[:plot_end]
+    
     fig, ax = plt.subplots(2,1, figsize=(10,6), sharex=True)
-    ax[0].plot(t, x_rel_val, label='Measured x_rel (val)', linewidth=1)
-    ax[0].plot(t, x_sim, '--', label='Simulated x (model)', linewidth=1)
+    ax[0].plot(t_plot, x_rel_plot, label='Measured x_rel (val)', linewidth=1)
+    ax[0].plot(t_plot, x_sim_plot, '--', label='Simulated x (model)', linewidth=1)
     ax[0].set_ylabel('Relative displacement [m]')
     ax[0].legend(); ax[0].grid(True)
 
-    ax[1].plot(t, v_rel_val, label='Measured v_rel (val)', linewidth=1)
-    ax[1].plot(t, v_sim, '--', label='Simulated v (model)', linewidth=1)
+    ax[1].plot(t_plot, v_rel_plot, label='Measured v_rel (val)', linewidth=1)
+    ax[1].plot(t_plot, v_sim_plot, '--', label='Simulated v (model)', linewidth=1)
     ax[1].set_ylabel('Relative velocity [m/s]')
     ax[1].set_xlabel('Time [s]')
     ax[1].legend(); ax[1].grid(True)
-    plt.suptitle(f'Validation Level {val_level}: Time-domain comparison')
+    plt.suptitle(f'Validation Level {val_level}: Time-domain comparison (first 50s)')
     plt.tight_layout()
     plt.show()
 
     # ---------------- PLOT: RFS slices (validation: measured vs predicted) ----------------
     # build predicted restoring force at validation measured x,v for slice plots
-    R_pred_val = predict_restoring_force(x_rel_val, v_rel_val, alpha, x_min, x_max, v_min, v_max, poly_order)
+    R_pred_val = predict_restoring_force(x_rel_val, v_rel_val, alpha, s_x, b_x, s_v, b_v, poly_order)
 
     # stiff slice (near-zero velocity)
     stiff_mask = np.abs(v_rel_val) <= eps_v
@@ -280,7 +309,7 @@ for val_level in validation_level:
     plt.tight_layout()
     plt.show()
 
-    # ---------------- compute RMSE for the slices ----------------
+    # ---------------- Compute RMSE for the slices ----------------
     from math import sqrt
     rmse_stiff = None
     rmse_damp = None
@@ -297,6 +326,3 @@ for val_level in validation_level:
         overall_rmse = np.sqrt(0.5 * (rmse_stiff**2 + rmse_damp**2))
         print(f"Level {val_level} overall RMSE:         {overall_rmse:.6e}")
 
-print("-"*60)
-print("CHEBYSHEV TRAIN/VALIDATION COMPLETE")
-print("-"*60)
