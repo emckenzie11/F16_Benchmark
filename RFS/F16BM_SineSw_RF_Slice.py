@@ -26,8 +26,8 @@ freq_high = 8.6       # Upper frequency bound [Hz]
 m_eff = 1.0
 
 # Thresholds - determines thickness of RFS slices
-vel_thresh_frac = 0.01    # % of max |v_rel|
-disp_thresh_frac = 0.01   # % of max |x_rel|
+vel_thresh_frac = 0.02    # % of max |v_rel|
+disp_thresh_frac = 0.02   # % of max |x_rel|
 
 # Minimum floors in case of tiny signals
 vel_thresh_min = 1e-6
@@ -89,12 +89,12 @@ def compute_relative_motion(accel_i, accel_j, fs, f_lo, f_hi):
     x_rel = band_limited_integrate_fft(a_rel, fs, f_lo, f_hi, order=2)
     return x_rel, v_rel
 
-def compute_restoring_force(F_i_bp, accel_i_bp, m_eff=1.0):
+def compute_restoring_force( accel_i_bp, accel_j_bp, m_eff=1.0):
     """
     Restoring force proxy using band-passed acceleration at DOF i:
       R(t) ≈ F_i_bp - m_eff * a_i_bp.
     """
-    return F_i_bp - m_eff * accel_i_bp
+    return - m_eff * (accel_i_bp - accel_j_bp)
 
 # ----------- PROCESS DATA -----------
 # Store results for all levels
@@ -115,7 +115,7 @@ for level in training_level:
     x_rel, v_rel = compute_relative_motion(a_i_bp, a_j_bp, fs, freq_low, freq_high)
 
     # Compute restoring force
-    f_rest = compute_restoring_force(F_i_bp, a_i_bp, m_eff)
+    f_rest = compute_restoring_force(a_i_bp, a_j_bp, m_eff)
 
     # Add processed data directly to the training_data dictionary
     training_data[level]['x_rel'] = x_rel

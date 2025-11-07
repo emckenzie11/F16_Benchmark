@@ -16,8 +16,8 @@ print(f"Analysis started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 print("-"*60)
 
 # ----------- User configuration -----------
-training_level = [1, 3, 5]   # example: train on multiple levels 
-validation_level = [4]       # level(s) used for validation
+training_level = [1, 3, 5, 7]  # example: train on multiple levels
+validation_level = [4]          # level(s) used for validation
 location_i = 2
 location_j = 3
 
@@ -29,8 +29,8 @@ freq_low = 6.8
 freq_high = 8.6
 
 m_eff = 1.0               # effective mass (normalized)
-poly_order = 3            # Chebyshev order 
-integration_method = 'RK45'  # integration method: 'RK23' (fast) or 'RK45' (accurate)
+poly_order = 10        # Chebyshev order 
+integration_method = 'RK45'  # integration method
 
 # ----------- Load data -----------
 training_data = {
@@ -179,7 +179,7 @@ def simulate_response(force_input, alpha, s_x, b_x, s_v, b_v, poly_order,
     
     # Create interpolation function for force
     force_interp = interp1d(t_eval, F_bp, kind='linear', 
-                           bounds_error=True, fill_value='extrapolate')
+                           bounds_error=False, fill_value='extrapolate')
     
     def ode_system(t, y):
         """

@@ -3,7 +3,7 @@ import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.signal import butter, filtfilt, hilbert
+from scipy.signal import butter, filtfilt
 from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 from numpy.fft import rfft, irfft, rfftfreq
@@ -17,7 +17,7 @@ print("-"*60)
 
 # ----------- User configuration -----------
 training_level = [3]      # level(s) used to train R(x,v)
-validation_level = [2]    # level(s) used for validation
+validation_level = [2, 4, 6]  # level(s) used for validation
 location_i = 2
 location_j = 3
 
@@ -30,7 +30,7 @@ freq_high = 8.6
 
 m_eff = 1.0               # effective mass (normalized)
 poly_order = 3            # Chebyshev order 
-integration_method = 'RK45'  # integration method: 'RK23' (fast) or 'RK45' (accurate)
+integration_method = 'RK45'  # integration method
 
 # ----------- Load data -----------
 training_data = {
@@ -83,8 +83,8 @@ def compute_relative_motion(accel_i, accel_j, fs, f_lo, f_hi):
     return x_rel, v_rel
 
 # Compute restoring force
-def compute_restoring_force_from_accel(a_i_bp, m_eff=1.0):
-    # R(t) = - m * a(t)  (restoring force proxy)
+def compute_restoring_force_from_accel(a_i_bp,m_eff=1.0):
+    # R(t) = - m * a(t) 
     return -m_eff * a_i_bp
 
 # ----------- Restoring force prediction -----------
@@ -97,7 +97,7 @@ def compute_scaling_factors(x):
     - max(x) -> +1
     """
     x_min = np.min(x)
-    x_max = np.max(x)
+    x_max = np.max(x)   
     if x_max == x_min:
         # avoid div by zero if constant signal
         return 0.0, 0.0, np.zeros_like(x)
@@ -293,58 +293,6 @@ for val_level in validation_level:
                                            s_x, b_x, s_v, b_v, poly_order,
                                            dt, m_eff, x0=0.0, v0=0.0)
 
-    # Bandpass the force input to see when it reaches the target frequency band
-    force_bp_val = bandpass_filter(force_input_val, freq_low, freq_high, fs)
-    
-    # Compute Hilbert transform to get instantaneous amplitude
-    force_hilbert = hilbert(force_bp_val)
-    force_envelope = np.abs(force_hilbert)
-    
-    # Create time vector for plotting
-    t_val = np.arange(len(force_input_val)) / fs
-    
-    # Plot Hilbert transform envelope vs predicted relative velocity
-    plt.figure(figsize=(12, 8))
-    
-    # Plot first 50 seconds for clarity
-    plot_samples = min(20000, len(t_val))  # ~50s at 400Hz
-    t_plot = t_val[:plot_samples]
-    
-    plt.subplot(2, 1, 1)
-    plt.plot(t_plot, force_envelope[:plot_samples], 'r-', label='Force envelope (Hilbert)', linewidth=1.5)
-    plt.ylabel('Force envelope [N]')
-    plt.title(f'Level {val_level}: Bandpassed Force Envelope vs Predicted Relative Velocity')
-    plt.legend()
-    plt.grid(True)
-    
-    plt.subplot(2, 1, 2)
-    plt.plot(t_plot, v_sim[:plot_samples], 'b-', label='Predicted rel. velocity', linewidth=1)
-    plt.plot(t_plot, v_rel_val[:plot_samples], 'g--', label='Measured rel. velocity', linewidth=1, alpha=0.7)
-    plt.xlabel('Time [s]')
-    plt.ylabel('Velocity [m/s]')
-    plt.legend()
-    plt.grid(True)
-    
-    plt.tight_layout()
-    plt.show()
-    
-    # Also create overlay plot to directly compare timing
-    plt.figure(figsize=(12, 6))
-    
-    # Normalize both signals for comparison
-    force_norm = force_envelope[:plot_samples] / np.max(force_envelope[:plot_samples])
-    vel_norm = np.abs(v_sim[:plot_samples]) / np.max(np.abs(v_sim[:plot_samples]))
-    
-    plt.plot(t_plot, force_norm, 'r-', label='Normalized force envelope', linewidth=2)
-    plt.plot(t_plot, vel_norm, 'b-', label='Normalized |predicted vel|', linewidth=1.5, alpha=0.8)
-    
-    plt.xlabel('Time [s]')
-    plt.ylabel('Normalized amplitude')
-    plt.title(f'Level {val_level}: Timing Comparison - Force Input vs Velocity Response')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
     # Save into validation_data for plotting convenience
     validation_data[val_level]['x_rel'] = x_rel_val
     validation_data[val_level]['v_rel'] = v_rel_val
@@ -385,8 +333,8 @@ for val_level in validation_level:
     v_sim = validation_data[val_level]['v_sim']
 
     t = np.arange(len(x_rel_val)) / fs
-    # Limit to first 50 seconds
-    max_samples = int(50 * fs)  # 50 seconds * sampling rate
+    # Limit to first 100 seconds
+    max_samples = int(100 * fs)  # 100 seconds * sampling rate
     plot_end = min(max_samples, len(x_rel_val))
     
     t_plot = t[:plot_end]
