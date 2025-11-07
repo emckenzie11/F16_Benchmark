@@ -16,7 +16,7 @@ print(f"Analysis started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 print("-"*60)
 
 # ----------- User configuration -----------
-training_level = [1, 3, 5, 7]  # example: train on multiple levels
+training_level = [1, 3]  # train on multiple levels
 validation_level = [4]          # level(s) used for validation
 location_i = 2
 location_j = 3
@@ -29,7 +29,7 @@ freq_low = 6.8
 freq_high = 8.6
 
 m_eff = 1.0               # effective mass (normalized)
-poly_order = 10        # Chebyshev order 
+poly_order = 3        # Chebyshev order 
 integration_method = 'RK45'  # integration method
 
 # ----------- Load data -----------
@@ -328,6 +328,26 @@ for val_level in validation_level:
     # Compute measured relative x, v for validation (to compare to sim)
     x_rel_val, v_rel_val = compute_relative_motion(a_i_bp_val, a_j_bp_val, fs, freq_low, freq_high)
 
+    # Plot relative states vs time for validation dataset
+    t_val = np.arange(len(x_rel_val)) / fs
+    
+    fig, ax = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    
+    ax[0].plot(t_val, x_rel_val, 'b-', linewidth=1, label='Relative displacement')
+    ax[0].set_ylabel('Relative displacement [m]')
+    ax[0].set_title(f'Validation Level {val_level}: Measured Relative States vs Time')
+    ax[0].grid(True)
+    ax[0].legend()
+    
+    ax[1].plot(t_val, v_rel_val, 'r-', linewidth=1, label='Relative velocity')
+    ax[1].set_ylabel('Relative velocity [m/s]')
+    ax[1].set_xlabel('Time [s]')
+    ax[1].grid(True)
+    ax[1].legend()
+    
+    plt.tight_layout()
+    plt.show()
+
     # Compute measured restoring force (to compare to sim)
     f_rest_val = compute_restoring_force_from_accel(a_i_bp_val, m_eff)
 
@@ -377,28 +397,29 @@ for val_level in validation_level:
     v_sim = validation_data[val_level]['v_sim']
 
     t = np.arange(len(x_rel_val)) / fs
-    # Limit to first 50 seconds
-    max_samples = int(50 * fs)  # 50 seconds * sampling rate
-    plot_end = min(max_samples, len(x_rel_val))
     
-    t_plot = t[:plot_end]
-    x_rel_plot = x_rel_val[:plot_end]
-    x_sim_plot = x_sim[:plot_end]
-    v_rel_plot = v_rel_val[:plot_end]
-    v_sim_plot = v_sim[:plot_end]
+    # Calculate scaling based on measured values
+    x_max_measured = np.max(np.abs(x_rel_val))
+    v_max_measured = np.max(np.abs(v_rel_val))
     
-    fig, ax = plt.subplots(2,1, figsize=(10,6), sharex=True)
-    ax[0].plot(t_plot, x_rel_plot, label='Measured x_rel (val)', linewidth=1)
-    ax[0].plot(t_plot, x_sim_plot, '--', label=f'Simulated x ({integration_method} model)', linewidth=1)
+    # Plot full data (no time limit) with scaling based on measured values
+    fig, ax = plt.subplots(2,1, figsize=(12,8), sharex=True)
+    ax[0].plot(t, x_rel_val, label='Measured x_rel (val)', linewidth=1)
+    ax[0].plot(t, x_sim, '--', label=f'Simulated x ({integration_method} model)', linewidth=1)
     ax[0].set_ylabel('Relative displacement [m]')
+    ax[0].set_ylim(-x_max_measured * 1.1, x_max_measured * 1.1)  # Scale to measured max ± 10%
     ax[0].legend(); ax[0].grid(True)
 
-    ax[1].plot(t_plot, v_rel_plot, label='Measured v_rel (val)', linewidth=1)
-    ax[1].plot(t_plot, v_sim_plot, '--', label=f'Simulated v ({integration_method} model)', linewidth=1)
+    ax[1].plot(t, v_rel_val, label='Measured v_rel (val)', linewidth=1)
+    ax[1].plot(t, v_sim, '--', label=f'Simulated v ({integration_method} model)', linewidth=1)
     ax[1].set_ylabel('Relative velocity [m/s]')
+    ax[1].set_ylim(-v_max_measured * 1.1, v_max_measured * 1.1)  # Scale to measured max ± 10%
     ax[1].set_xlabel('Time [s]')
     ax[1].legend(); ax[1].grid(True)
-    plt.suptitle(f'Validation Level {val_level}: Time-domain comparison (first 50s)')
+    
+    print(f"Plot scaling - Displacement: ±{x_max_measured:.2e} m, Velocity: ±{v_max_measured:.2e} m/s")
+    
+    plt.suptitle(f'Validation Level {val_level}: Time-domain comparison (full data)')
     plt.tight_layout()
     plt.show()
 

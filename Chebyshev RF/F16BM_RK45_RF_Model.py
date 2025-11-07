@@ -3,7 +3,7 @@ import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, hilbert
 from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 from numpy.fft import rfft, irfft, rfftfreq
@@ -17,7 +17,7 @@ print("-"*60)
 
 # ----------- User configuration -----------
 training_level = [3]      # level(s) used to train R(x,v)
-validation_level = [2, 4, 6]  # level(s) used for validation
+validation_level = [4]  # level(s) used for validation
 location_i = 2
 location_j = 3
 
@@ -162,24 +162,52 @@ def predict_restoring_force(x, v, alpha, s_x, b_x, s_v, b_v, poly_order):
         return R[0]
     return R
 
+def make_gate_from_envelope(F_bp, fs, frac_on=0.1, ramp_sec=0.7):
+    """
+    Build a smooth ramp-in gate for the band-passed force.
+    - frac_on: envelope fraction at which we ramp in (0..1)
+    - ramp_sec: raised-cosine ramp length (seconds)
+    """
+    N = len(F_bp)
+    t = np.arange(N)/fs
+    env = np.abs(hilbert(F_bp))
+    peak = np.max(env) + 1e-12
+
+    # --- ramp-in (entering band) ---
+    thr_on = frac_on * peak
+    idx_on = int(np.argmax(env >= thr_on))  # first time envelope crosses threshold
+    t0 = t[idx_on]
+    t1 = t0 + ramp_sec
+
+    gate = np.zeros_like(t)
+    in_ramp = (t >= t0) & (t <= t1)
+    gate[t > t1] = 1.0
+    if np.any(in_ramp):
+        tau = (t[in_ramp] - t0) / (t1 - t0)
+        gate[in_ramp] = 0.5 - 0.5*np.cos(np.pi * tau)  # raised-cosine
+
+    return gate, (t0, t1)
+
 # Simulate system response using configurable integration method
-def simulate_response(force_input, alpha, s_x, b_x, s_v, b_v, poly_order,
+def simulate_response(force_input_bp, alpha, s_x, b_x, s_v, b_v, poly_order,
                       dt, m_eff, x0=0.0, v0=0.0):
     """
     Simulate system response using RK (adaptive Runge-Kutta) integration.
+    Note: force_input_bp should already be bandpass filtered.
     """
-    N = len(force_input)
+    N = len(force_input_bp)
     
-    # Apply bandpass filter to force
-    F_bp = bandpass_filter(force_input, freq_low, freq_high, fs)
-    
-    # Create time vector
-    t_eval = np.arange(N) * dt
-    t_span = (0, t_eval[-1])
-    
-    # Create interpolation function for force
-    force_interp = interp1d(t_eval, F_bp, kind='linear', 
-                           bounds_error=False, fill_value='extrapolate')
+    # Build a smooth gate (ramp into the band)
+    gate, (t0, t1) = make_gate_from_envelope(force_input_bp, fs, frac_on=0.1, ramp_sec=20)
+    print(f"Gate timing: t0 = {t0:.3f} s, t1 = {t1:.3f} s")
+    F_drive = force_input_bp * gate
+
+    # Use full time series with gated force
+    t_eval = np.arange(len(F_drive)) * dt
+    t_span = (0.0, t_eval[-1])
+
+    force_interp = interp1d(t_eval, F_drive, kind='linear',
+                            bounds_error=False, fill_value='extrapolate')
     
     def ode_system(t, y):
         """
@@ -210,9 +238,9 @@ def simulate_response(force_input, alpha, s_x, b_x, s_v, b_v, poly_order,
     v = sol.y[1]  # velocity
     
     # Compute acceleration at each time point
-    a = np.zeros(N)
-    for i in range(N):
-        F_val = F_bp[i]
+    a = np.zeros(len(x))
+    for i in range(len(x)):
+        F_val = F_drive[i]
         R_val = predict_restoring_force(x[i], v[i], alpha, s_x, b_x, s_v, b_v, poly_order)
         a[i] = (F_val - R_val) / m_eff
     
@@ -278,18 +306,39 @@ for val_level in validation_level:
     accel_j_val = validation_data[val_level][f'Acceleration{location_j}'].to_numpy()
     force_input_val = validation_data[val_level]['Force'].to_numpy()
 
-    # Bandpass (same filter as training)
+    # Bandpass filtering (same filter as training)
     a_i_bp_val = bandpass_filter(accel_i_val, freq_low, freq_high, fs)
     a_j_bp_val = bandpass_filter(accel_j_val, freq_low, freq_high, fs)
+    force_bp_val = bandpass_filter(force_input_val, freq_low, freq_high, fs)
 
     # Compute measured relative x, v for validation (to compare to sim)
     x_rel_val, v_rel_val = compute_relative_motion(a_i_bp_val, a_j_bp_val, fs, freq_low, freq_high)
 
+    # Plot measured relative states vs time for validation dataset
+    t_val = np.arange(len(x_rel_val)) / fs
+    
+    fig, ax = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    
+    ax[0].plot(t_val, x_rel_val, 'b-', linewidth=1, label='Relative displacement')
+    ax[0].set_ylabel('Relative displacement [m]')
+    ax[0].set_title(f'Validation Level {val_level}: Measured Relative States vs Time')
+    ax[0].grid(True)
+    ax[0].legend()
+    
+    ax[1].plot(t_val, v_rel_val, 'r-', linewidth=1, label='Relative velocity')
+    ax[1].set_ylabel('Relative velocity [m/s]')
+    ax[1].set_xlabel('Time [s]')
+    ax[1].grid(True)
+    ax[1].legend()
+    
+    plt.tight_layout()
+    plt.show()
+
     # Compute measured restoring force (to compare to sim)
     f_rest_val = compute_restoring_force_from_accel(a_i_bp_val, m_eff)
 
-    # Simulate response using learned Chebyshev model
-    x_sim, v_sim, a_sim = simulate_response(force_input_val, alpha,
+    # Simulate response using learned Chebyshev model (using pre-bandpassed force)
+    x_sim, v_sim, a_sim = simulate_response(force_bp_val, alpha,
                                            s_x, b_x, s_v, b_v, poly_order,
                                            dt, m_eff, x0=0.0, v0=0.0)
 
@@ -333,28 +382,29 @@ for val_level in validation_level:
     v_sim = validation_data[val_level]['v_sim']
 
     t = np.arange(len(x_rel_val)) / fs
-    # Limit to first 100 seconds
-    max_samples = int(100 * fs)  # 100 seconds * sampling rate
-    plot_end = min(max_samples, len(x_rel_val))
     
-    t_plot = t[:plot_end]
-    x_rel_plot = x_rel_val[:plot_end]
-    x_sim_plot = x_sim[:plot_end]
-    v_rel_plot = v_rel_val[:plot_end]
-    v_sim_plot = v_sim[:plot_end]
+    # Plot full time history 
+    # Calculate scaling based on measured values 
+    x_max_measured = np.max(np.abs(x_rel_val))
+    v_max_measured = np.max(np.abs(v_rel_val))
     
-    fig, ax = plt.subplots(2,1, figsize=(10,6), sharex=True)
-    ax[0].plot(t_plot, x_rel_plot, label='Measured x_rel (val)', linewidth=1)
-    ax[0].plot(t_plot, x_sim_plot, '--', label=f'Simulated x ({integration_method} model)', linewidth=1)
+    fig, ax = plt.subplots(2,1, figsize=(12,8), sharex=True)
+    ax[0].plot(t, x_rel_val, label='Measured x_rel (val)', linewidth=1)
+    ax[0].plot(t, x_sim, '--', label=f'Simulated x ({integration_method} model)', linewidth=1)
     ax[0].set_ylabel('Relative displacement [m]')
+    ax[0].set_ylim(-x_max_measured * 1.1, x_max_measured * 1.1)  # Scale to measured max ± 10%
     ax[0].legend(); ax[0].grid(True)
 
-    ax[1].plot(t_plot, v_rel_plot, label='Measured v_rel (val)', linewidth=1)
-    ax[1].plot(t_plot, v_sim_plot, '--', label=f'Simulated v ({integration_method} model)', linewidth=1)
+    ax[1].plot(t, v_rel_val, label='Measured v_rel (val)', linewidth=1)
+    ax[1].plot(t, v_sim, '--', label=f'Simulated v ({integration_method} model)', linewidth=1)
     ax[1].set_ylabel('Relative velocity [m/s]')
+    ax[1].set_ylim(-v_max_measured * 1.1, v_max_measured * 1.1)  # Scale to measured max ± 10%
     ax[1].set_xlabel('Time [s]')
     ax[1].legend(); ax[1].grid(True)
-    plt.suptitle(f'Validation Level {val_level}: Time-domain comparison (first 50s)')
+    
+    print(f"Plot scaling - Displacement: ±{x_max_measured:.2e} m, Velocity: ±{v_max_measured:.2e} m/s")
+    
+    plt.suptitle(f'Validation Level {val_level}: Time-domain comparison (full data)')
     plt.tight_layout()
     plt.show()
 
