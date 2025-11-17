@@ -9,9 +9,9 @@ from numpy.fft import rfft, irfft, rfftfreq
 os.system('cls' if os.name == 'nt' else 'clear')
 
 # ----------- USER CONFIGURATION -----------
-training_level = [3]  # Levels to compute RFS (Options: 1, 3, 5, 7)
-location_i = 2  # DOF i
-location_j = 3  # DOF j
+training_level = [1, 3, 5, 7]  # Levels to compute RFS (Options: 1, 3, 5, 7)
+location_i = 2  # DOF i (wing side of NL connection)
+location_j = 3  # DOF j (payload side of NL connection)
 
 # Data parameters
 fs = 400              # Sampling frequency in Hz
@@ -25,9 +25,9 @@ freq_high = 8.6       # Upper frequency bound [Hz]
 # Effective mass
 m_eff = 1.0
 
-# Thresholds - determines thickness of RFS slices
-vel_thresh_frac = 0.02    # % of max |v_rel|
-disp_thresh_frac = 0.02   # % of max |x_rel|
+# Thresholds - determines thickness of RFS slices (1.0 = projection)
+vel_thresh_frac = 1   # % of max |v_rel|
+disp_thresh_frac = 1   # % of max |x_rel|
 
 # Minimum floors in case of tiny signals
 vel_thresh_min = 1e-6
@@ -89,12 +89,12 @@ def compute_relative_motion(accel_i, accel_j, fs, f_lo, f_hi):
     x_rel = band_limited_integrate_fft(a_rel, fs, f_lo, f_hi, order=2)
     return x_rel, v_rel
 
-def compute_restoring_force( accel_i_bp, accel_j_bp, m_eff=1.0):
+def compute_restoring_force( accel_i_bp, m_eff=1.0):
     """
     Restoring force proxy using band-passed acceleration at DOF i:
-      R(t) ≈ F_i_bp - m_eff * a_i_bp.
+      R(t) ≈ - m_eff * a_i_bp.
     """
-    return - m_eff * (accel_i_bp - accel_j_bp)
+    return - m_eff * (accel_i_bp)
 
 # ----------- PROCESS DATA -----------
 # Store results for all levels
@@ -115,15 +115,15 @@ for level in training_level:
     x_rel, v_rel = compute_relative_motion(a_i_bp, a_j_bp, fs, freq_low, freq_high)
 
     # Compute restoring force
-    f_rest = compute_restoring_force(a_i_bp, a_j_bp, m_eff)
+    f_rest = compute_restoring_force(a_i_bp, m_eff)
 
     # Add processed data directly to the training_data dictionary
     training_data[level]['x_rel'] = x_rel
     training_data[level]['v_rel'] = v_rel
     training_data[level]['f_rest'] = f_rest
 
-# ----------- SLICE ANALYSIS WITH 2% THRESHOLD -----------
-# Thresholds for slicing (2% of maximum values)
+# ----------- SLICE ANALYSIS WITH THRESHOLD -----------
+# Thresholds for slicing (x% of maximum values)
 print("-"*60)
 print(f"Velocity threshold: {vel_thresh_frac*100}% of max |v_rel|")
 print(f"Displacement threshold: {disp_thresh_frac*100}% of max |x_rel|")

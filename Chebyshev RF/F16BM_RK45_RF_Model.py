@@ -189,7 +189,6 @@ ax1.scatter(x_pooled[vel_mask_pooled], f_rest_pooled[vel_mask_pooled], s=8, alph
 ax1.set_xlabel('Relative Displacement [m]')
 ax1.set_ylabel('Restoring Force [N]')
 ax1.set_title('Pooled Training Data: Stiffness slice (near-zero velocity)')
-ax1.set_xlim(-x_max_pooled * 1.1, x_max_pooled * 1.1)
 ax1.grid(True)
 ax1.legend()
 
@@ -198,7 +197,6 @@ ax2.scatter(v_pooled[disp_mask_pooled], f_rest_pooled[disp_mask_pooled], s=8, al
 ax2.set_xlabel('Relative Velocity [m/s]')
 ax2.set_ylabel('Restoring Force [N]')
 ax2.set_title('Pooled Training Data: Damping slice (near-zero displacement)')
-ax2.set_xlim(-v_max_pooled * 1.1, v_max_pooled * 1.1)
 ax2.grid(True)
 ax2.legend()
 
@@ -267,8 +265,8 @@ for val_level in validation_level:
 
     t = np.arange(len(x_rel_val)) / fs
     
-    # Define time window for plotting (120-180 seconds)
-    t_start, t_end = 120.0, 180.0
+    # Define time window for plotting (140-200 seconds)
+    t_start, t_end = 140.0, 200.0
     idx_start = int(t_start * fs)
     idx_end = int(t_end * fs)
     
@@ -340,13 +338,11 @@ for val_level in validation_level:
     ax1.scatter(x_rel_val[vel_mask], f_rest_val[vel_mask], s=8, alpha=0.5, label='Measured Restoring Force')
     ax1.scatter(x_sim[vel_mask], f_rest_sim[vel_mask], s=6, alpha=0.9, marker='x', label='Predicted Restoring Force (Cheb)')
     ax1.set_xlabel('Relative Displacement [m]'); ax1.set_ylabel('Restoring Force [N]'); ax1.set_title('Stiffness slice (near-zero velocity)')
-    ax1.set_xlim(-x_max_measured * 1.1, x_max_measured * 1.1)  # Set x-axis limits based on measured data
     ax1.grid(True); ax1.legend()
 
     ax2.scatter(v_rel_val[disp_mask], f_rest_val[disp_mask], s=8, alpha=0.5, label='Measured Restoring Force')
     ax2.scatter(v_sim[disp_mask], f_rest_sim[disp_mask], s=6, alpha=0.9, marker='x', label='Predicted Restoring Force (Cheb)')
     ax2.set_xlabel('Relative Velocity [m/s]'); ax2.set_ylabel('Restoring Force [N]'); ax2.set_title('Damping slice (near-zero displacement)')
-    ax2.set_xlim(-v_max_measured * 1.1, v_max_measured * 1.1)  # Set x-axis limits based on measured data
     ax2.grid(True); ax2.legend()
 
     plt.suptitle(f'Validation Level {val_level}: RFS slices')

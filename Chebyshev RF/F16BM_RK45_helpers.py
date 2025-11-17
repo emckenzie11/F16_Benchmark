@@ -157,41 +157,6 @@ def predict_RF(x, v, alpha, s_x, b_x, s_v, b_v, poly_order, k0=0.0, c0=0.0, incl
         return result[0]
     return result
 
-def make_gate_from_envelope(F_bp, fs, frac_on=0.05, ramp_sec=20, ramp_out_sec=20):
-    """
-    Build a smooth gate with both ramp-in and ramp-out for the band-passed force.
-    - frac_on: envelope fraction at which we ramp in/out (0..1)
-    - ramp_sec: raised-cosine ramp-in length (seconds)
-    - ramp_out_sec: raised-cosine ramp-out length (seconds)
-    """
-    t = np.arange(len(F_bp))/fs
-    env = np.abs(hilbert(F_bp))
-    peak = np.max(env)
-    thr_on = frac_on * peak
-    
-    # Find ramp-in and ramp-out points
-    idx_on = np.argmax(env >= thr_on)
-    idx_off = len(env) - np.argmax(env[::-1] >= thr_on)
-    
-    t0, t1 = t[idx_on], t[idx_on] + ramp_sec
-    t2, t3 = t[idx_off] - ramp_out_sec, t[idx_off]
-
-    gate = np.zeros_like(t)
-    
-    # Ramp in
-    in_ramp = (t >= t0) & (t <= t1)
-    gate[in_ramp] = 0.5 - 0.5*np.cos(np.pi*(t[in_ramp]-t0)/(t1-t0))
-    
-    # Full on
-    gate[t > t1] = 1.0
-    
-    # Ramp out
-    out_ramp = (t >= t2) & (t <= t3)
-    gate[out_ramp] = 0.5 + 0.5*np.cos(np.pi*(t[out_ramp]-t2)/(t3-t2))
-    gate[t > t3] = 0.0
-    
-    return gate, (t0, t1, t2, t3)
-
 # Simulate system response using configurable integration method
 def simulate_response(force_input, alpha, s_x, b_x, s_v, b_v, poly_order,
                       dt, m_eff, integration_method='RK45', x0=0.0, v0=0.0,
