@@ -11,7 +11,6 @@ training_level = [1, 3, 5, 7]
 validation_level = [2]
 location_i = 2  # DOF i (wing side of NL connection)
 location_j = 3  # DOF j (payload side of NL connection)
-location_k = 1  # DOF k (shaker location)
 
 # Data parameters
 fs = 400              # Sampling frequency in Hz
@@ -36,7 +35,6 @@ training_data = {lvl: training_data[lvl] for lvl in training_level}
 validation_data = {lvl: validation_data[lvl] for lvl in validation_level}
 
 # ----------- PROCESS TRAINING DATA -----------
-# Initialise
 X = []  # Will store acceleration matrices
 C = np.array([12.4, 36.8, 73.6, 97.8])  # Force levels for conditioning 
 
@@ -57,8 +55,7 @@ for level in training_level:
 
 # Convert to 3D array
 X = np.array(X)   
-
-# Normalise 
+ 
 # Normalise acceleration data
 X_mean = np.mean(X)
 X_std = np.std(X)
@@ -69,7 +66,7 @@ C_mean = np.mean(C)
 C_std = np.std(C)
 C_normalized = (C - C_mean) / C_std
 
-# Store normalisation parameters for later use
+# Store normalisation parameters
 normalisation_params = {
     'X_mean': X_mean, 'X_std': X_std,
     'C_mean': C_mean, 'C_std': C_std
@@ -109,7 +106,7 @@ class Encoder(nn.Module):
         x = F.relu(self.conv1(x))          # (batch, 32, 4096)
         x = self.pool1(x)                  # (batch, 32, 512)
         x = self.global_pool(x)            # (batch, 32, 1)
-        x = x.view(x.size(0), -1)          # (batch, 32) - Flatten!
+        x = x.view(x.size(0), -1)          # (batch, 32) - Flatten
         
         # Branch 2: Process condition
         c = F.relu(self.cond_fc(c))        # (batch, 16)
@@ -331,7 +328,6 @@ for loc_idx in range(n_locations):
     ax_freq.legend()
 
 plt.tight_layout()
-plt.savefig('Figures/cVAE_Validation_Comparison.png', dpi=300, bbox_inches='tight')
 plt.show()
 
 # ----------- RMSE CALCULATION -----------
@@ -342,6 +338,4 @@ for loc_idx in range(n_locations):
     y_t_np = y_t.detach().numpy() if hasattr(y_t, 'detach') else y_t
     rmse = np.sqrt(np.mean((y_mod_np - y_t_np)**2))
     print(f"{location_names[loc_idx]} RMSE: {rmse:.6f}")
-
-print(f"Plotting saved to: Figures/cVAE_Validation_Comparison.png")
     
