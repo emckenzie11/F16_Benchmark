@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # ----------- USER CONFIGURATION -----------
 training_level = [1, 3, 5, 7] 
-validation_level = [2]
+validation_level = [6]
 location_i = 2  # DOF i (wing side of NL connection)
 location_j = 3  # DOF j (payload side of NL connection)
 
@@ -236,7 +236,8 @@ X_val_raw = np.array(X_val)
 X_val_normalized = (X_val_raw - normalisation_params['X_mean']) / normalisation_params['X_std']
 
 # Validation force levels and normalize using TRAINING parameters  
-C_val_raw = np.array([24.6])  # Level 2 force amplitude
+force_levels = {2: 24.6, 4: 61.4, 6: 85.7}  # Level to force mapping
+C_val_raw = np.array([force_levels[validation_level[0]]])  # Get force for selected validation level
 C_val_normalized = (C_val_raw - normalisation_params['C_mean']) / normalisation_params['C_std']
 
 # Convert to PyTorch tensors
