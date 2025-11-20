@@ -196,12 +196,21 @@ def cvae_loss(x_recon, x, mu, logvar, beta=1.0):
 model = cVAE()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 num_epochs = 2000
-beta = 0.1
+beta_max = 0.1
+warmup_epochs = 500  # Number of epochs to reach full beta
 print(f"Training {sum(p.numel() for p in model.parameters() if p.requires_grad):,} parameters for {num_epochs} epochs")
+print(f"Beta warmup: 0 → {beta_max} over {warmup_epochs} epochs")
 
 # ----------- TRAINING -----------
 for epoch in range(num_epochs):
     model.train()
+    
+    # Beta warmup schedule
+    if epoch < warmup_epochs:
+        beta = beta_max * (epoch / warmup_epochs)  # Linear warmup
+    else:
+        beta = beta_max
+    
     x_train_recon, mu_train, logvar_train, z_train = model(X_train_torch, C_train_torch)
     total_loss, recon_loss, kl_loss = cvae_loss(x_train_recon, X_train_torch, mu_train, logvar_train, beta)
     
@@ -210,7 +219,7 @@ for epoch in range(num_epochs):
     optimizer.step()
     
     if (epoch + 1) % 200 == 0:
-        print(f"Epoch {epoch+1}: Loss = {total_loss.item():.1f} (Recon = {recon_loss.item():.1f}, KL = {kl_loss.item():.1f})")
+        print(f"Epoch {epoch+1}: Loss = {total_loss.item():.1f} (Recon = {recon_loss.item():.1f}, KL = {kl_loss.item():.1f}, β = {beta:.3f})")
 
 # ----------- VALIDATION DATA PROCESSING (FOR ERROR CALCULATION) -----------
 # Initialise
@@ -285,7 +294,7 @@ with torch.no_grad():
     # Convert mean back to torch
     x_val_recon_mean_torch = torch.from_numpy(x_val_recon_mean).to(X_val_torch.device)
 
-    val_total_loss, val_recon_loss, val_kl_loss = cvae_loss(x_val_recon_mean_torch, X_val_torch, mu_val, logvar_val, beta)
+    val_total_loss, val_recon_loss, val_kl_loss = cvae_loss(x_val_recon_mean_torch, X_val_torch, mu_val, logvar_val, beta_max)
 
 # --------------- DENORMALIZE FOR ANALYSIS -----------
 # Denormalize validation data back to original scale
@@ -301,7 +310,7 @@ t = np.arange(sequence_length) / fs_downsampled
 
 # Setup figure with subplots
 fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-fig.suptitle(f'cVAE Reconstruction: Simulated vs Validation Data\nLevel 2 (Force: 24.6N)', fontsize=16, fontweight='bold')
+fig.suptitle(f'cVAE Reconstruction: Simulated vs Validation Data\nLevel {validation_level[0]} (Force: {C_val_raw[0]:.1f}N)', fontsize=16, fontweight='bold')
 
 # Location names for plotting
 location_names = [f'Location {location_i} (Wing Side)', f'Location {location_j} (Payload Side)']
