@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 from scipy.signal import butter, filtfilt
+import plotly.graph_objects as go
 from numpy.fft import rfft, irfft, rfftfreq
 
 # Clear terminal
@@ -11,7 +12,7 @@ os.system('cls' if os.name == 'nt' else 'clear')
 
 # ----------- USER CONFIGURATION -----------
 # Plot configuration
-levels_to_compute = [1]  # Levels to compute RFS (Options: 1, 3, 5, 7)
+levels_to_compute = [1, 3, 5, 7]  # Levels to compute RFS (Options: 1, 3, 5, 7)
 location_i = 2  # DOF i (location where acceleration is measured)
 location_j = 3  # DOF j (location across the nonlinear connection)
 
@@ -133,66 +134,59 @@ for level in levels_to_compute:
 # ---------------------- 3D Plotting ----------------------
 
 def plot_3d_restoring_force_scatter(level, title_suffix=""):
-    """Plot 3D restoring force scatter plot for a single level."""
+    """Plot 3D restoring force scatter plot for a single level using Plotly."""
     rel_disp = rfs_data[level]['rel_disp']
     rel_vel = rfs_data[level]['rel_vel']
     R = rfs_data[level]['restoring_force']
     
     print(f"Level {level}: Plotting {len(rel_disp)} points")
     
-    # Create 3D plot
-    fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
+    # Create Plotly 3D scatter plot
+    fig = go.Figure(data=[go.Scatter3d(
+        x=rel_disp,
+        y=rel_vel,
+        z=R,
+        mode='markers',
+        marker=dict(
+            size=3,
+            color=R,
+            colorscale='Viridis',
+            showscale=True,
+            colorbar=dict(title='-Acceleration [m/s²]')
+        )
+    )])
     
-    # Create scatter plot with color mapping based on restoring force
-    scatter = ax.scatter(rel_disp, rel_vel, R, c=R, cmap='viridis', 
-                        s=20, alpha=0.6)
-    
-    # Labels and title
-    ax.set_xlabel('Relative Displacement [m]')
-    ax.set_ylabel('Relative Velocity [m/s]')
-    ax.set_zlabel('-Acceleration [m/s²]')
-    ax.set_title(f'Restoring Force Scatter - Level {level}{title_suffix}')
-    
-    # Add colorbar
-    cbar = plt.colorbar(scatter, ax=ax, shrink=0.8, aspect=20)
-    cbar.set_label('-Acceleration [m/s²]')
-    
-    # Format axes with scientific notation
-    ax.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
-    ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
-    ax.ticklabel_format(style='sci', axis='z', scilimits=(0,0))
-    
-    # Set viewing angle for better visualization
-    ax.view_init(elev=20, azim=45)
+    # Update layout with labels and title
+    fig.update_layout(
+        title=f'Restoring Force Scatter - Level {level}{title_suffix}',
+        scene=dict(
+            xaxis_title='Relative Displacement [m]',
+            yaxis_title='Relative Velocity [m/s]',
+            zaxis_title='-Acceleration [m/s²]'
+        ),
+        width=1200,
+        height=900
+    )
     
     return fig
 
 # Dynamic plotting based on number of levels
 n_levels = len(levels_to_compute)
-figures = []  # Store all figures to show them simultaneously
+html_files = []  # Store HTML filenames
+output_dir = "Figures/RestoringForce3D"
+os.makedirs(output_dir, exist_ok=True)
 
 print(f"\nGenerating 3D Restoring Force Scatter plots for {n_levels} level(s)...")
 
-if n_levels == 1:
-    # Single level: one 3D plot
-    fig = plot_3d_restoring_force_scatter(levels_to_compute[0])
-    figures.append(fig)
+for i, level in enumerate(levels_to_compute):
+    title_suffix = f" ({chr(97+i)})" if n_levels > 1 else ""
+    fig = plot_3d_restoring_force_scatter(level, title_suffix)
     
-elif n_levels == 2:
-    # Two levels: create individual 3D plots for each level
-    for i, level in enumerate(levels_to_compute):
-        fig = plot_3d_restoring_force_scatter(level, f" ({chr(97+i)})")
-        figures.append(fig)
-        
-else:
-    # Multiple levels: create individual 3D plots for each level  
-    for i, level in enumerate(levels_to_compute):
-        fig = plot_3d_restoring_force_scatter(level, f" ({chr(97+i)})")
-        figures.append(fig)
-
-# Show all figures simultaneously
-plt.show()
+    # Write HTML file
+    html_filename = os.path.join(output_dir, f"RestoringForce_Level{level}_3D_Scatter.html")
+    fig.write_html(html_filename)
+    html_files.append(html_filename)
+    print(f"  -> Exported: {html_filename}")
 
 print("\n" + "="*60)
 print("3D Restoring Force Scatter Computation Complete")
@@ -202,4 +196,7 @@ print(f"Location i (acceleration measured): {location_i}")
 print(f"Location j (across connection): {location_j}")
 print(f"Mode isolated: {freq_low}-{freq_high} Hz")
 print("All data points plotted in 3D scatter")
+print(f"\nInteractive HTML files exported ({len(html_files)}):")
+for html_file in html_files:
+    print(f"  - {html_file}")
 print("="*60)

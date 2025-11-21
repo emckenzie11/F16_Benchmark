@@ -2,20 +2,31 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from architecture import cVAE, cvae_loss
+from helpers import process_acceleration_data, normalize_data
 
 # ----------- USER CONFIGURATION -----------
+# Data levels and locations
 training_level = [1, 3, 5, 7] 
-validation_level = [6]
+validation_level = [2]
 location_i = 2  # DOF i (wing side of NL connection)
 location_j = 3  # DOF j (payload side of NL connection)
+force_levels = {2: 24.6, 4: 61.4, 6: 85.7}  # Level to force mapping 
 
 # Data parameters
 fs = 400              # Sampling frequency in Hz
 dt = 1 / fs           # Time step
 
+# Model parameters
+latent_dim = 64          # Size of latent space
+sequence_length = 4096   # Downsampled length
+n_locations = 2          # Number of acceleration locations
+condition_dim = 1        # Single force amplitude condition
+
+# Training parameters
+num_epochs = 1200
+beta_max = 0.04
+warmup_epochs = 100  # Number of epochs to reach full beta
 # ----------- LOAD DATA -----------
 training_data = {
     1: pd.read_csv('BenchmarkData/F16Data_FullMSine_Level1.csv'), # 12.4N
@@ -35,169 +46,55 @@ training_data = {lvl: training_data[lvl] for lvl in training_level}
 validation_data = {lvl: validation_data[lvl] for lvl in validation_level}
 
 # ----------- PROCESS TRAINING DATA -----------
-X = []  # Will store acceleration matrices
-C = np.array([12.4, 36.8, 73.6, 97.8])  # Force levels for conditioning 
+X_raw = process_acceleration_data(training_data, training_level, location_i, location_j)
+X_val_raw = process_acceleration_data(validation_data, validation_level, location_i, location_j)
 
-for level in training_level:
-    accel_matrix = np.vstack([
-        training_data[level][f'Acceleration{location_i}'].to_numpy(),  # Row 0: Location i
-        training_data[level][f'Acceleration{location_j}'].to_numpy(),  # Row 1: Location j  
-        ])
-    
-    # Extract second to last period and downsample
-    points_per_period = 8192
-    start_idx = 7 * points_per_period
-    end_idx = 8 * points_per_period # Second to last period
-
-    accel_matrix = accel_matrix[:, start_idx:end_idx][:, ::2]  # Extract 8th period and downsample by factor of 2 
-    
-    X.append(accel_matrix)
-
-# Convert to 3D array
-X = np.array(X)   
+C_raw = np.array([12.4, 36.8, 73.6, 97.8])  # Force levels for conditioning  
+C_val_raw = np.array([force_levels[validation_level[0]]])  # Get condition  for selected validation level
  
-# Normalise acceleration data
-X_mean = np.mean(X)
-X_std = np.std(X)
-X_normalized = (X - X_mean) / X_std
-
-# Normalise conditions 
-C_mean = np.mean(C)
-C_std = np.std(C)
-C_normalized = (C - C_mean) / C_std
+# Normalise acceleration data and conditions
+X_normalized, X_mean, X_std = normalize_data(X_raw)
+C_normalized, C_mean, C_std = normalize_data(C_raw)
+X_val_normalized, X_val_mean, X_val_std = normalize_data(X_val_raw)
+C_val_normalized, C_val_mean, C_val_std = normalize_data(C_val_raw)
 
 # Store normalisation parameters
 normalisation_params = {
     'X_mean': X_mean, 'X_std': X_std,
-    'C_mean': C_mean, 'C_std': C_std
+    'C_mean': C_mean, 'C_std': C_std,
+    'X_val_mean': X_val_mean, 'X_val_std': X_val_std,
+    'C_val_mean': C_val_mean, 'C_val_std': C_val_std,
 }
 
-# Convert to PyTorch format
-X_train_torch = torch.FloatTensor(X_normalized)
-C_train_torch = torch.FloatTensor(C_normalized.reshape(-1, 1))  # (4,) → (4,1) for proper input
+# ----------- POD COMPUTATION -----------
+# Concatenate acceleration data from all training levels
+# X_normalized shape: (4, 2, 4096) -> extract each level and concatenate
+X1 = X_normalized[0]  # Level 1: (2, 4096)
+X3 = X_normalized[1]  # Level 3: (2, 4096)
+X5 = X_normalized[2]  # Level 5: (2, 4096)
+X7 = X_normalized[3]  # Level 7: (2, 4096)
 
-# ----------- PARAMETERS -----------
-latent_dim = 32          # Size of latent space
-sequence_length = 4096   # Downsampled length
-n_locations = 2          # Number of acceleration locations
-condition_dim = 1        # Single force amplitude condition
+# Concatenate along time axis: S shape will be (8192, 2) - each column is a snapshot
+S = np.concatenate([X1.T, X3.T, X5.T, X7.T], axis=0)
 
-# ----------- ENCODER ARCHITECTURE -----------
-class Encoder(nn.Module):
-    def __init__(self, input_dim=8192, condition_dim=1, latent_dim=32):
-        super().__init__()
-        
-        # Acceleration branch
-        self.fc1 = nn.Linear(input_dim, 1024)
-        self.fc2 = nn.Linear(1024, 256)
+# Compute SVD: S = U * Σ * V^T
+U, Sigma, VT = np.linalg.svd(S, full_matrices=False)
 
-        # Condition branch
-        self.fc_cond = nn.Linear(condition_dim, 16)
+# POD Modes
+Phi = VT
+Phi_torch = torch.tensor(Phi, dtype=torch.float32)
 
-        # Combined layers
-        self.fc_combined = nn.Linear(256 + 16, 128)
-        self.fc_mu = nn.Linear(128, latent_dim)
-        self.fc_logvar = nn.Linear(128, latent_dim)
+# Modal coefficients & stack
+a1 = Phi @ X1      # shape (2, 4096)
+a3 = Phi @ X3
+a5 = Phi @ X5
+a7 = Phi @ X7
+A = np.stack([a1, a3, a5, a7], axis=0)  # Shape: (4, 2, 4096)
 
-    def forward(self, x, c):
-        # Flatten acceleration
-        x = x.view(x.size(0), -1)           # (batch, 8192)
-
-        # Acceleration MLP
-        x = F.relu(self.fc1(x))             # (batch, 1024)
-        x = F.relu(self.fc2(x))             # (batch, 256)
-
-        # Condition MLP
-        c = F.relu(self.fc_cond(c))         # (batch, 16)
-
-        # Combine
-        h = torch.cat([x, c], dim=1)        # (batch, 272)
-        h = F.relu(self.fc_combined(h))     # (batch, 128)
-
-        # Latent mean and variance
-        mu = self.fc_mu(h)                  # (batch, latent_dim)
-        logvar = self.fc_logvar(h)          # (batch, latent_dim)
-
-        return mu, logvar
-
-# ----------- DECODER ARCHITECTURE -----------
-class Decoder(nn.Module):
-    def __init__(self, output_dim=8192, condition_dim=1, latent_dim=32):
-        super().__init__()
-
-        # Process latent + condition together
-        self.fc_cond = nn.Linear(condition_dim, 16)
-        self.fc_z = nn.Linear(latent_dim, 64)
-        self.fc_combined = nn.Linear(64 + 16, 256)
-
-        # MLP to expand to output size
-        self.fc1 = nn.Linear(256, 1024)
-        self.fc2 = nn.Linear(1024, output_dim)
-
-    def forward(self, z, c):
-        # Condition embedding
-        c = F.relu(self.fc_cond(c))         # (batch, 16)
-        
-        # Latent embedding
-        z = F.relu(self.fc_z(z))            # (batch, 64)
-
-        # Combine
-        h = torch.cat([z, c], dim=1)        # (batch, 80)
-        h = F.relu(self.fc_combined(h))     # (batch, 256)
-
-        # MLP expansion
-        h = F.relu(self.fc1(h))             # (batch, 1024)
-        x_hat = self.fc2(h)                 # (batch, 8192)
-
-        # Reshape back to (batch, 2, 4096)
-        return x_hat.view(z.size(0), 2, 4096)
-
-# ----------- cVAE ARCHITECTURE -----------
-class cVAE(nn.Module):
-    def __init__(self, latent_dim=32):
-        super().__init__()
-        self.encoder = Encoder(latent_dim=latent_dim)
-        self.decoder = Decoder(latent_dim=latent_dim)
-    
-    def reparameterize(self, mu, logvar):
-        # Reparameterisation trick: z = μ + σ·ε
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-    
-    def forward(self, x, c):
-        # Encode inputs to latent distribution
-        mu, logvar = self.encoder(x, c)
-
-        # Sample latent vector
-        z = self.reparameterize(mu, logvar)
-
-        # Decode latent vector to reconstruction
-        x_recon = self.decoder(z, c)
-
-        return x_recon, mu, logvar, z
-
-# ----------- LOSS FUNCTION -----------
-def cvae_loss(x_recon, x, mu, logvar, beta=1.0):
-    """cVAE loss: reconstruction + KL divergence"""
-    
-    # Reconstruction loss (MSE)
-    recon_loss = F.mse_loss(x_recon, x, reduction='sum')
-    
-    # KL divergence loss: KL(q(z|x,c) || p(z))
-    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    
-    # Total loss
-    total_loss = recon_loss + beta * kl_loss
-    
-    return total_loss, recon_loss, kl_loss
 
 # ----------- TRAINING SETUP -----------
-model = cVAE()
+model = cVAE(latent_dim=latent_dim)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-num_epochs = 2000
-beta_max = 0.1
-warmup_epochs = 500  # Number of epochs to reach full beta
 print(f"Training {sum(p.numel() for p in model.parameters() if p.requires_grad):,} parameters for {num_epochs} epochs")
 print(f"Beta warmup: 0 → {beta_max} over {warmup_epochs} epochs")
 
@@ -211,8 +108,11 @@ for epoch in range(num_epochs):
     else:
         beta = beta_max
     
-    x_train_recon, mu_train, logvar_train, z_train = model(X_train_torch, C_train_torch)
-    total_loss, recon_loss, kl_loss = cvae_loss(x_train_recon, X_train_torch, mu_train, logvar_train, beta)
+    # Forward pass: model learns in POD modal space
+    a_train_recon, mu_train, logvar_train, z_train = model(X_train, C_train)
+    
+    # Loss in modal space (POD coordinates)
+    total_loss, recon_loss, kl_loss = cvae_loss(a_train_recon, X_train, mu_train, logvar_train, beta)
     
     optimizer.zero_grad()
     total_loss.backward()
@@ -220,90 +120,47 @@ for epoch in range(num_epochs):
     
     if (epoch + 1) % 200 == 0:
         print(f"Epoch {epoch+1}: Loss = {total_loss.item():.1f} (Recon = {recon_loss.item():.1f}, KL = {kl_loss.item():.1f}, β = {beta:.3f})")
-
-# ----------- VALIDATION DATA PROCESSING (FOR ERROR CALCULATION) -----------
-# Initialise
-X_val = []  # Will store acceleration matrices
-
-for level in validation_level:
-    accel_matrix = np.vstack([
-        validation_data[level][f'Acceleration{location_i}'].to_numpy(),  # Row 0: Location i
-        validation_data[level][f'Acceleration{location_j}'].to_numpy(),  # Row 1: Location j  
-        ])
-    
-    # Extract second to last period and downsample
-    points_per_period = 8192
-    start_idx = 7 * points_per_period
-    end_idx = 8 * points_per_period # Second to last period
-
-    accel_matrix = accel_matrix[:, start_idx:end_idx][:, ::2]  # Extract 8th period and downsample by factor of 2 
-    
-    X_val.append(accel_matrix)
-
-# Convert to arrays and normalize using TRAINING parameters 
-X_val_raw = np.array(X_val)
-X_val_normalized = (X_val_raw - normalisation_params['X_mean']) / normalisation_params['X_std']
-
-# Validation force levels and normalize using TRAINING parameters  
-force_levels = {2: 24.6, 4: 61.4, 6: 85.7}  # Level to force mapping
-C_val_raw = np.array([force_levels[validation_level[0]]])  # Get force for selected validation level
-C_val_normalized = (C_val_raw - normalisation_params['C_mean']) / normalisation_params['C_std']
-
-# Convert to PyTorch tensors
-X_val_torch = torch.FloatTensor(X_val_normalized)
-C_val_torch = torch.FloatTensor(C_val_normalized.reshape(-1, 1))
-
-# --------------- SIMULATE THE MODEL -----------
+        
+# --------------- SIMULATE THE MODEL USING DECODER ONLY -----------
 model.eval()
 with torch.no_grad():
-
-    # Encode to get latent distribution parameters
-    mu_val, logvar_val = model.encoder(X_val_torch, C_val_torch)
-    std_val = torch.exp(0.5 * logvar_val)
-
-    # Generate multiple stochastic reconstruction
+    # Generate multiple stochastic reconstructions using decoder only
     n_samples = 50
-    val_samples = []
+    val_samples_modal = []  # Store in modal space
+    val_samples_phys = []   # Store in physical space
 
     for _ in range(n_samples):
-        eps = torch.randn_like(std_val)          # Sample epsilon
-        z_val_sample = mu_val + eps * std_val    # Sample z
-        x_val_sample = model.decoder(z_val_sample, C_val_torch)  # Decode sample
+        z_sim = torch.randn(X_val.shape[0], latent_dim, device=C_val.device)  # Sample from prior ~ N(0, I)
+        a_sim = model.decoder(z_sim, C_val)  # Decode to modal coordinates (B, 2, 4096)
+        
+        # Reconstruct back to physical DOFs: X = Phi_r^T @ a
+        X_sim = torch.einsum('cr,brt->bct', Phi_r_torch, a_sim)  # (B, 2, 4096)
+        
+        val_samples_modal.append(a_sim.cpu().numpy())
+        val_samples_phys.append(X_sim.cpu().numpy())
 
-        val_samples.append(x_val_sample.cpu().numpy())
+    # Stack samples
+    val_samples_modal = np.array(val_samples_modal)  # (n_samples, batch, 2, 4096) in modal space
+    val_samples = np.array(val_samples_phys)          # (n_samples, batch, 2, 4096) in physical space
 
-    # Stack samples: (n_samples, batch, 2, 4096)
-    val_samples = np.array(val_samples)
-
-    # Mean reconstruction using sample mean
-    x_val_recon_mean = val_samples.mean(axis=0)         # (batch, 2, 4096)
-
-    # Calculte deterministic mean 
-    x_val_mean = model.decoder(mu_val, C_val_torch)     # (batch, 2, 4096)
-
-    # Compare deterministic vs sample-based means
-    reconstruction_rmse = np.sqrt(np.mean((x_val_recon_mean - x_val_mean.cpu().numpy())**2))
-    print(f"RMSE between deterministic and sample-based reconstruction: {reconstruction_rmse:.6f}")
-    print(f"Deterministic mean range: [{x_val_mean.min().item():.4f}, {x_val_mean.max().item():.4f}]")
-    print(f"Sample-based mean range: [{x_val_recon_mean.min():.4f}, {x_val_recon_mean.max():.4f}]")
-
+    # Calculate mean reconstruction from samples (in physical space)
+    X_val_sample_mean = val_samples.mean(axis=0)         
+    
     # Standard deviation for uncertainty bands
-    x_val_recon_std = val_samples.std(axis=0)           # (batch, 2, 4096)
+    X_val_recon_std = val_samples.std(axis=0)           
 
-    # For loss calculation, use the mean reconstruction
     # Convert mean back to torch
-    x_val_recon_mean_torch = torch.from_numpy(x_val_recon_mean).to(X_val_torch.device)
-
-    val_total_loss, val_recon_loss, val_kl_loss = cvae_loss(x_val_recon_mean_torch, X_val_torch, mu_val, logvar_val, beta_max)
+    X_val_sample_mean_torch = torch.from_numpy(X_val_sample_mean).to(X_val.device)
 
 # --------------- DENORMALIZE FOR ANALYSIS -----------
 # Denormalize validation data back to original scale
-X_val_true = X_val_torch * normalisation_params['X_std'] + normalisation_params['X_mean']
-X_val_recon = x_val_recon_mean * normalisation_params['X_std'] + normalisation_params['X_mean']
+# Note: X_val is in modal space, need to use original X_val_normalized
+X_val_true = X_val_torch * normalisation_params['X_val_std'] + normalisation_params['X_val_mean']
+X_val_recon = X_val_sample_mean_torch * normalisation_params['X_val_std'] + normalisation_params['X_val_mean']
 
 # Denormalize samples for uncertainty analysis
-val_samples_denorm = val_samples * normalisation_params['X_std'] + normalisation_params['X_mean']
-
+val_samples_denorm = val_samples * normalisation_params['X_val_std'] + normalisation_params['X_val_mean']
+    
 # ----------- PLOTTING -----------
 fs_downsampled = fs / 2
 t = np.arange(sequence_length) / fs_downsampled
@@ -349,7 +206,7 @@ for loc_idx in range(n_locations):
     
     # Select 1 second of data (200 samples at 200 Hz)
     zoom_samples = int(1.0 * fs_downsampled)  # 200 samples for 1 second
-    start_idx = len(t) // 4  # Start at 1/4 through the signal
+    start_idx = len(t) // 2  # Start at 1/2 through the signal
     end_idx = start_idx + zoom_samples
     
     t_zoom = t[start_idx:end_idx]

@@ -1,5 +1,6 @@
-
-# Minimal requirements
 matplotlib>=3.6
 numpy>=1.24
 scipy>=1.10
+pandas>=2.0
+torch
+plotly>=5.0

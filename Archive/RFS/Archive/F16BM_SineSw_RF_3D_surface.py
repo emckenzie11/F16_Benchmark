@@ -5,6 +5,7 @@ from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 from scipy.signal import butter, filtfilt
 from scipy.interpolate import griddata
+import plotly.graph_objects as go
 from numpy.fft import rfft, irfft, rfftfreq
 
 # Clear terminal
@@ -12,7 +13,7 @@ os.system('cls' if os.name == 'nt' else 'clear')
 
 # ----------- USER CONFIGURATION -----------
 # Plot configuration
-levels_to_compute = [1]  # Levels to compute RFS (Options: 1, 3, 5, 7)
+levels_to_compute = [1, 3, 5, 7]  # Levels to compute RFS (Options: 1, 3, 5, 7)
 location_i = 2  # DOF i (location where acceleration is measured)
 location_j = 3  # DOF j (location across the nonlinear connection)
 
@@ -134,16 +135,12 @@ for level in levels_to_compute:
 # ---------------------- 3D Plotting ----------------------
 
 def plot_3d_restoring_force_surface(level, title_suffix="", grid_size=50):
-    """Plot 3D restoring force surface for a single level using surface plot."""
+    """Plot 3D restoring force surface for a single level using Plotly surface plot."""
     rel_disp = rfs_data[level]['rel_disp']
     rel_vel = rfs_data[level]['rel_vel']
     R = rfs_data[level]['restoring_force']
     
     print(f"Level {level}: Converting {len(rel_disp)} points to surface plot")
-    
-    # Create 3D plot
-    fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
     
     # Create regular grid for surface plot
     x_min, x_max = rel_disp.min(), rel_disp.max()
@@ -153,9 +150,6 @@ def plot_3d_restoring_force_surface(level, title_suffix="", grid_size=50):
     xi = np.linspace(x_min, x_max, grid_size)
     yi = np.linspace(y_min, y_max, grid_size)
     X, Y = np.meshgrid(xi, yi)
-    
-    # Interpolate R values onto the grid using griddata
-    from scipy.interpolate import griddata
     
     # Stack the coordinates
     points = np.column_stack((rel_disp, rel_vel))
@@ -171,62 +165,35 @@ def plot_3d_restoring_force_surface(level, title_suffix="", grid_size=50):
         # If cubic fails, use linear interpolation
         Z = griddata(points, R, (X, Y), method='linear', fill_value=np.nan)
     
-    # Create surface plot
-    surface = ax.plot_surface(X, Y, Z, cmap='viridis', alpha=0.8, 
-                             linewidth=0, antialiased=True, edgecolors='none')
+    # Create Plotly 3D surface plot
+    fig = go.Figure(data=[go.Surface(x=X, y=Y, z=Z, colorscale='Viridis')])
     
-    # Labels and title
-    ax.set_xlabel('Relative Displacement [m]')
-    ax.set_ylabel('Relative Velocity [m/s]')
-    ax.set_zlabel('-Acceleration [m/s²]')
-    ax.set_title(f'Restoring Force Surface - Level {level}{title_suffix}')
-    
-    # Add colorbar
-    cbar = plt.colorbar(surface, ax=ax, shrink=0.8, aspect=20)
-    cbar.set_label('-Acceleration [m/s²]')
-    
-    # Format axes with scientific notation
-    ax.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
-    ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
-    ax.ticklabel_format(style='sci', axis='z', scilimits=(0,0))
-    
-    # Set viewing angle for better visualization
-    ax.view_init(elev=20, azim=45)
+    # Update layout with labels and title
+    fig.update_layout(
+        title=f'Restoring Force Surface - Level {level}{title_suffix}',
+        scene=dict(
+            xaxis_title='Relative Displacement [m]',
+            yaxis_title='Relative Velocity [m/s]',
+            zaxis_title='-Acceleration [m/s²]'
+        ),
+        width=1200,
+        height=900
+    )
     
     return fig
 
 # Dynamic plotting based on number of levels
 n_levels = len(levels_to_compute)
-figures = []  # Store all figures to show them simultaneously
+html_files = []  # Store HTML filenames
+output_dir = "Figures/RestoringForce3D"
+os.makedirs(output_dir, exist_ok=True)
 
-print(f"\nGenerating 3D Restoring Force Surface plots for {n_levels} level(s)...")
-
-if n_levels == 1:
-    # Single level: one 3D plot
-    fig = plot_3d_restoring_force_surface(levels_to_compute[0])
-    figures.append(fig)
+for i, level in enumerate(levels_to_compute):
+    title_suffix = f" ({chr(97+i)})" if n_levels > 1 else ""
+    fig = plot_3d_restoring_force_surface(level, title_suffix)
     
-elif n_levels == 2:
-    # Two levels: create individual 3D plots for each level
-    for i, level in enumerate(levels_to_compute):
-        fig = plot_3d_restoring_force_surface(level, f" ({chr(97+i)})")
-        figures.append(fig)
-        
-else:
-    # Multiple levels: create individual 3D plots for each level  
-    for i, level in enumerate(levels_to_compute):
-        fig = plot_3d_restoring_force_surface(level, f" ({chr(97+i)})")
-        figures.append(fig)
-
-# Show all figures simultaneously
-plt.show()
-
-print("\n" + "="*60)
-print("3D Restoring Force Surface Computation Complete")
-print("="*60)
-print(f"Analyzed {len(levels_to_compute)} excitation levels")
-print(f"Location i (acceleration measured): {location_i}")
-print(f"Location j (across connection): {location_j}")
-print(f"Mode isolated: {freq_low}-{freq_high} Hz")
-print("All data points plotted in 3D surface")
-print("="*60)
+    # Write HTML file
+    html_filename = os.path.join(output_dir, f"RestoringForce_Level{level}_3D.html")
+    fig.write_html(html_filename)
+    html_files.append(html_filename)
+    print(f"  -> Exported: {html_filename}")
