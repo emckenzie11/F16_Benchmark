@@ -22,7 +22,7 @@ class Encoder(nn.Module):
 
     def forward(self, x, c):
         # Flatten acceleration
-        x = x.view(x.size(0), -1)           # (batch, 8192)
+        x = x.view(x.size(0), -1)           # (batch, input_dim)
 
         # Acceleration MLP
         x = F.relu(self.fc1(x))             # (batch, 512)
@@ -69,7 +69,7 @@ class Decoder(nn.Module):
 
         # MLP expansion
         h = F.relu(self.fc1(h))             # (batch, 512)
-        x_hat = self.fc2(h)                 # (batch, 8192)
+        x_hat = self.fc2(h)                 # (batch, 12288)
 
         # Reshape back to (batch, 2, 4096)
         return x_hat.view(z.size(0), 2, 4096)
@@ -77,10 +77,10 @@ class Decoder(nn.Module):
 
 # ----------- cVAE ARCHITECTURE -----------
 class cVAE(nn.Module):
-    def __init__(self, latent_dim=16):
+    def __init__(self, latent_dim=16, input_dim=8192):
         super().__init__()
-        self.encoder = Encoder(latent_dim=latent_dim)
-        self.decoder = Decoder(latent_dim=latent_dim)
+        self.encoder = Encoder(input_dim=input_dim, latent_dim=latent_dim)
+        self.decoder = Decoder(output_dim=input_dim, latent_dim=latent_dim)
     
     def reparameterize(self, mu, logvar):
         # Reparameterisation trick: z = μ + σ·ε

@@ -1,26 +1,117 @@
 import numpy as np
+import pandas as pd
+from datetime import datetime
+import os
+import openpyxl
+
+def save_results_to_tracker(results_dict, tracker_file='cVAE/results.xlsx'):
+    """
+    Save experiment results to Excel tracker file.
+    
+    Args:
+        results_dict: Dictionary containing experiment results and parameters
+        tracker_file: Path to Excel tracker file (relative to parent directory)
+    """
+    # Determine next test number
+    test_number = 1
+    if os.path.exists(tracker_file):
+        try:
+            existing_df = pd.read_excel(tracker_file, sheet_name=0)
+            if len(existing_df) > 0 and 'test_number' in existing_df.columns:
+                test_number = existing_df['test_number'].max() + 1
+            else:
+                test_number = len(existing_df) + 1
+        except Exception:
+            test_number = 1
+    
+    # Add test number and timestamp as first columns
+    results_dict_with_metadata = {
+        'test_number': test_number,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    results_dict_with_metadata.update(results_dict)
+    
+    # Check if tracker file exists
+    if os.path.exists(tracker_file):
+        try:
+            # Read existing tracker
+            existing_df = pd.read_excel(tracker_file, sheet_name=0)
+
+            # Create new row DataFrame
+            new_row_df = pd.DataFrame([results_dict_with_metadata])
+
+            # Align dtypes and columns to avoid concat dtype-inference issues
+            existing_cols = list(existing_df.columns)
+            new_cols = [col for col in new_row_df.columns if col not in existing_cols]
+
+            # Ensure new_row_df has all existing columns with matching dtypes
+            for col in existing_cols:
+                if col not in new_row_df.columns:
+                    # create a single-row column with same dtype as existing_df[col]
+                    try:
+                        new_row_df[col] = pd.Series([pd.NA], dtype=existing_df[col].dtype)
+                    except Exception:
+                        new_row_df[col] = pd.NA
+                else:
+                    # Try casting to the existing dtype to keep types consistent
+                    try:
+                        new_row_df[col] = new_row_df[col].astype(existing_df[col].dtype)
+                    except Exception:
+                        pass
+
+            # For any new columns present only in new_row_df, add them to existing_df with matching dtype
+            for col in new_cols:
+                try:
+                    existing_df[col] = pd.Series([pd.NA] * len(existing_df), dtype=new_row_df[col].dtype)
+                except Exception:
+                    existing_df[col] = pd.NA
+
+            # Maintain column order
+            column_order = existing_cols + new_cols
+            existing_df = existing_df.reindex(columns=column_order)
+            new_row_df = new_row_df.reindex(columns=column_order)
+
+            # Combine dataframes
+            combined_df = pd.concat([existing_df, new_row_df], ignore_index=True)
+
+        except Exception:
+            combined_df = pd.DataFrame([results_dict_with_metadata])
+    else:
+        combined_df = pd.DataFrame([results_dict_with_metadata])
+    
+    # Save to Excel
+    try:
+        combined_df.to_excel(tracker_file, index=False, engine='openpyxl')
+    except Exception:
+        # Fallback to CSV if Excel fails
+        csv_file = tracker_file.replace('.xlsx', '.csv')
+        combined_df.to_csv(csv_file, index=False)
 
 
-def process_acceleration_data(data_dict, levels, location_i, location_j):
+def process_acceleration_data(data_dict, levels, location_i=None, location_j=None):
     """
     Extract and process acceleration data from multiple levels.
-    
+
     Args:
         data_dict: Dictionary mapping level numbers to pandas DataFrames
         levels: List of levels to process
-        location_i: First DOF location (wing side)
-        location_j: Second DOF location (payload side)
-    
+        location_i: First DOF location to extract (wing side)
+        location_j: Second DOF location to extract (payload side)
+
     Returns:
         np.ndarray: Array of shape (n_levels, 2, 4096) containing processed acceleration data
+                    with rows [location_i, location_j]
     """
     X = []
     
     for level in levels:
-        accel_matrix = np.vstack([
-            data_dict[level][f'Acceleration{location_i}'].to_numpy(),  # Row 0: Location i
-            data_dict[level][f'Acceleration{location_j}'].to_numpy(),  # Row 1: Location j  
-        ])
+        # Always build list of acceleration arrays in order: [location_i, location_j]
+        accel_arrays = [
+            data_dict[level][f'Acceleration{location_i}'].to_numpy(),  # Row 0: Location i (wing side)
+            data_dict[level][f'Acceleration{location_j}'].to_numpy(),  # Row 1: Location j (payload side)
+        ]
+        
+        accel_matrix = np.vstack(accel_arrays)
         
         # Extract second to last period and downsample
         points_per_period = 8192
