@@ -88,7 +88,8 @@ def save_results_to_tracker(results_dict, tracker_file='cVAE/results.xlsx'):
         combined_df.to_csv(csv_file, index=False)
 
 
-def process_acceleration_data(data_dict, levels, location_i=None, location_j=None):
+def process_acceleration_data(data_dict, levels, location_i=None, location_j=None,
+                              points_per_period=8192, period_number=8, n_periods=1, downsample_factor=2):
     """
     Extract and process acceleration data from multiple levels.
 
@@ -97,10 +98,14 @@ def process_acceleration_data(data_dict, levels, location_i=None, location_j=Non
         levels: List of levels to process
         location_i: First DOF location to extract (wing side)
         location_j: Second DOF location to extract (payload side)
+        points_per_period: Number of samples per period in the raw data (default 8192)
+        period_number: 1-based index of the first period to extract (default 8)
+        n_periods: Number of consecutive periods to extract (default 1)
+        downsample_factor: Integer downsampling factor to apply after extraction (default 2)
 
     Returns:
-        np.ndarray: Array of shape (n_levels, 2, 4096) containing processed acceleration data
-                    with rows [location_i, location_j]
+        np.ndarray: Array of shape (n_levels, 2, sequence_length) containing processed acceleration data
+                    where sequence_length = (points_per_period * n_periods) // downsample_factor
     """
     X = []
     
@@ -112,14 +117,15 @@ def process_acceleration_data(data_dict, levels, location_i=None, location_j=Non
         ]
         
         accel_matrix = np.vstack(accel_arrays)
-        
-        # Extract second to last period and downsample
-        points_per_period = 8192
-        start_idx = 7 * points_per_period
-        end_idx = 8 * points_per_period  # Second to last period
-        
-        accel_matrix = accel_matrix[:, start_idx:end_idx][:, ::2]  # Extract 8th period and downsample by factor of 2 
-        
+
+        # Determine indices for requested period(s)
+        # period_number is 1-based, so convert to 0-based index
+        start_idx = (period_number - 1) * points_per_period
+        end_idx = start_idx + n_periods * points_per_period
+
+        # Extract requested period block and downsample by provided factor
+        accel_matrix = accel_matrix[:, start_idx:end_idx][:, ::downsample_factor]
+
         X.append(accel_matrix)
     
     return np.array(X)

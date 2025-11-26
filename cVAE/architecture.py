@@ -5,35 +5,36 @@ import torch.nn.functional as F
 
 # ----------- ENCODER ARCHITECTURE -----------
 class Encoder(nn.Module):
-    def __init__(self, input_dim=8192, condition_dim=1, latent_dim=16):
+    def __init__(self, input_dim=8192, condition_dim=1, latent_dim=8):
         super().__init__()
         
-        # Acceleration branch
-        self.fc1 = nn.Linear(input_dim, 512)
-        self.fc2 = nn.Linear(512, 128)
+        # Acceleration branch (smaller MLP)
+        self.fc1 = nn.Linear(input_dim, 256)
+        self.fc2 = nn.Linear(256, 64)
 
         # Condition branch
         self.fc_cond = nn.Linear(condition_dim, 8)
 
         # Combined layers
-        self.fc_combined = nn.Linear(128 + 8, 256)
-        self.fc_mu = nn.Linear(256, latent_dim)
-        self.fc_logvar = nn.Linear(256, latent_dim)
+        self.fc_combined = nn.Linear(64 + 8, 128)
+        self.fc_mu = nn.Linear(128, latent_dim)
+        self.fc_logvar = nn.Linear(128, latent_dim)
 
     def forward(self, x, c):
         # Flatten acceleration
         x = x.view(x.size(0), -1)           # (batch, input_dim)
 
         # Acceleration MLP
-        x = F.relu(self.fc1(x))             # (batch, 512)
-        x = F.relu(self.fc2(x))             # (batch, 128)
+        x = F.relu(self.fc1(x))             # (batch, 256)
+        x = F.relu(self.fc2(x))             # (batch, 64)
 
         # Condition MLP
         c = F.relu(self.fc_cond(c))         # (batch, 8)
 
         # Combine
-        h = torch.cat([x, c], dim=1)        # (batch, 136)
-        h = F.relu(self.fc_combined(h))     # (batch, 256)
+        # x: (batch, 64), c: (batch, 8) -> concat (batch, 72)
+        h = torch.cat([x, c], dim=1)        # (batch, 72)
+        h = F.relu(self.fc_combined(h))     # (batch, 128)
 
         # Latent mean and variance
         mu = self.fc_mu(h)                  # (batch, latent_dim)
@@ -44,43 +45,53 @@ class Encoder(nn.Module):
 
 # ----------- DECODER ARCHITECTURE -----------
 class Decoder(nn.Module):
-    def __init__(self, output_dim=8192, condition_dim=1, latent_dim=16):
+    def __init__(self, output_dim=8192, n_locations=2, sequence_length=4096, condition_dim=1, latent_dim=8):
         super().__init__()
+        # Save shape params for reshape
+        self.n_locations = int(n_locations)
+        self.sequence_length = int(sequence_length)
 
         # Process latent + condition together
         self.fc_cond = nn.Linear(condition_dim, 8)
-        self.fc_z = nn.Linear(latent_dim, 128)
-        self.fc_combined = nn.Linear(128 + 8, 256)
+        self.fc_z = nn.Linear(latent_dim, 64)
+        self.fc_combined = nn.Linear(64 + 8, 128)
 
-        # MLP to expand to output size
-        self.fc1 = nn.Linear(256, 512)
-        self.fc2 = nn.Linear(512, output_dim)
+        # MLP to expand to output size (mirror of encoder)
+        self.fc1 = nn.Linear(128, 256)
+        self.fc2 = nn.Linear(256, output_dim)
 
     def forward(self, z, c):
         # Condition embedding
         c = F.relu(self.fc_cond(c))         # (batch, 8)
         
         # Latent embedding
-        z = F.relu(self.fc_z(z))            # (batch, 128)
+        z = F.relu(self.fc_z(z))            # (batch, 64)
 
         # Combine
-        h = torch.cat([z, c], dim=1)        # (batch, 136)
-        h = F.relu(self.fc_combined(h))     # (batch, 256)
+        # z: (batch,64), c: (batch,8) -> concat (batch,72)
+        h = torch.cat([z, c], dim=1)        # (batch, 72)
+        h = F.relu(self.fc_combined(h))     # (batch, 128)
 
         # MLP expansion
-        h = F.relu(self.fc1(h))             # (batch, 512)
-        x_hat = self.fc2(h)                 # (batch, 12288)
+        h = F.relu(self.fc1(h))             # (batch, 256)
+        x_hat = self.fc2(h)                 # (batch, output_dim)
 
-        # Reshape back to (batch, 2, 4096)
-        return x_hat.view(z.size(0), 2, 4096)
+        # Reshape back to (batch, n_locations, sequence_length)
+        batch_size = z.size(0)
+        expected = self.n_locations * self.sequence_length
+        if x_hat.numel() != batch_size * expected:
+            raise RuntimeError(f"Decoder produced {x_hat.numel()} elements but expected {batch_size * expected} "
+                               f"(batch={batch_size}, n_locations={self.n_locations}, sequence_length={self.sequence_length})")
+
+        return x_hat.view(batch_size, self.n_locations, self.sequence_length)
 
 
 # ----------- cVAE ARCHITECTURE -----------
 class cVAE(nn.Module):
-    def __init__(self, latent_dim=16, input_dim=8192):
+    def __init__(self, latent_dim=8, input_dim=8192, n_locations=2, sequence_length=4096):
         super().__init__()
         self.encoder = Encoder(input_dim=input_dim, latent_dim=latent_dim)
-        self.decoder = Decoder(output_dim=input_dim, latent_dim=latent_dim)
+        self.decoder = Decoder(output_dim=input_dim, n_locations=n_locations, sequence_length=sequence_length, latent_dim=latent_dim)
     
     def reparameterize(self, mu, logvar):
         # Reparameterisation trick: z = μ + σ·ε

@@ -6,9 +6,22 @@ from architecture import cVAE, cvae_loss
 from helpers import process_acceleration_data, normalize_data
 
 # ----------- USER CONFIGURATION -----------
+# Validation level
+validation_level = [6]
+
+# User-configurable data-shape parameters
+period_number = 7   # Which period to start from (1-based)
+n_periods = 1   # How many consecutive periods to extract
+downsample_factor = 2   # Downsampling factor to apply to extracted block 
+
+# Training parameters
+num_epochs = 1200
+beta_max = 0.04
+warmup_epochs = 100  # Number of epochs to reach full beta
+
+# ----------- PARAMETERS -----------
 # Data levels and locations
 training_level = [1, 3, 5, 7]
-validation_level = [2]
 location_i = 2  # DOF i (wing side of NL connection)
 location_j = 3  # DOF j (payload side of NL connection)
 force_levels = {2: 24.6, 4: 61.4, 6: 85.7}  # Level to force mapping 
@@ -17,16 +30,14 @@ force_levels = {2: 24.6, 4: 61.4, 6: 85.7}  # Level to force mapping
 fs = 400              # Sampling frequency in Hz
 dt = 1 / fs           # Time step
 
+# Data shape parameters
+points_per_period = 8192
+
 # Model parameters
-latent_dim = 64          # Size of latent space
-sequence_length = 4096   # Downsampled length
+latent_dim = 8           # Size of latent space (reduced)
+sequence_length = (points_per_period * n_periods) // downsample_factor  # Sequence length after extraction and downsampling
 n_locations = 2          # Number of acceleration locations
 condition_dim = 1        # Single force amplitude condition
-
-# Training parameters
-num_epochs = 1200
-beta_max = 0.04
-warmup_epochs = 100  # Number of epochs to reach full beta
 
 # ----------- LOAD DATA -----------
 training_data = {
@@ -47,8 +58,18 @@ training_data = {lvl: training_data[lvl] for lvl in training_level}
 validation_data = {lvl: validation_data[lvl] for lvl in validation_level}
 
 # ----------- PROCESS DATA -----------
-X_raw = process_acceleration_data(training_data, training_level, location_i=location_i, location_j=location_j)
-X_val_raw = process_acceleration_data(validation_data, validation_level, location_i=location_i, location_j=location_j)
+X_raw = process_acceleration_data(training_data, training_level,
+                                  location_i=location_i, location_j=location_j,
+                                  points_per_period=points_per_period,
+                                  period_number=period_number,
+                                  n_periods=n_periods,
+                                  downsample_factor=downsample_factor)
+X_val_raw = process_acceleration_data(validation_data, validation_level,
+                                      location_i=location_i, location_j=location_j,
+                                      points_per_period=points_per_period,
+                                      period_number=period_number,
+                                      n_periods=n_periods,
+                                      downsample_factor=downsample_factor)
 
 C_raw = np.array([12.4, 36.8, 73.6, 97.8])  # Force levels for conditioning  
 C_val_raw = np.array([force_levels[validation_level[0]]])  # Get condition  for selected validation level
@@ -56,19 +77,16 @@ C_val_raw = np.array([force_levels[validation_level[0]]])  # Get condition  for 
 # Normalise acceleration data and conditions
 X_normalized, X_mean, X_std = normalize_data(X_raw)
 C_normalized, C_mean, C_std = normalize_data(C_raw)
-X_val_normalized, X_val_mean, X_val_std = normalize_data(X_val_raw)
-C_val_normalized, C_val_mean, C_val_std = normalize_data(C_val_raw)
 
 # Store normalisation parameters
 normalisation_params = {
     'X_mean': X_mean, 'X_std': X_std,
     'C_mean': C_mean, 'C_std': C_std,
-    'X_val_mean': X_val_mean, 'X_val_std': X_val_std,
-    'C_val_mean': C_val_mean, 'C_val_std': C_val_std,
 }
 
+# Normalize validation using training statistics to keep conditioning consistent
+C_val_normalized = (C_val_raw - C_mean) / C_std
 C_val = torch.tensor(C_val_normalized, dtype=torch.float32).unsqueeze(-1)  # Force conditions (1, 1)
-X_val = torch.tensor(X_val_normalized, dtype=torch.float32)  # Normalized accelerations (1, 2, 4096)
 
 # ----------- POD COMPUTATION -----------
 # Concatenate acceleration data from all training levels
@@ -83,11 +101,11 @@ S = np.concatenate([X1, X3, X5, X7], axis=1)
 # Compute SVD: S = U * Σ * V^T
 U, Sigma, VT = np.linalg.svd(S, full_matrices=False)
 
-# POD Modes
-print(f"U: {U}")
+# POD Modes (spatial)
 energies = Sigma**2
 energy_frac = energies / energies.sum()
-print(f"Mode energy fraction: {energy_frac}")
+print(f"POD: S shape={S.shape}, U shape={U.shape}, n_modes={len(Sigma)}")
+print(f"Mode energy fraction (first 5): {energy_frac[:5]}")
 
 # Modal coefficients & stack
 a1 = U.T @ X1      # shape (2, 4096)
@@ -102,10 +120,14 @@ A_train = torch.tensor(A, dtype=torch.float32)  # Modal coefficients (4, 2, 4096
 C_train = torch.tensor(C_normalized, dtype=torch.float32).unsqueeze(-1)  # Force conditions (4, 1)
 
 # ----------- TRAINING SETUP -----------
-model = cVAE(latent_dim=latent_dim)
+# Ensure model input dimension matches (n_locations * sequence_length)
+input_dim = n_locations * sequence_length
+model = cVAE(latent_dim=latent_dim, input_dim=input_dim, n_locations=n_locations, sequence_length=sequence_length)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-print(f"Training {sum(p.numel() for p in model.parameters() if p.requires_grad):,} parameters for {num_epochs} epochs")
-print(f"Beta warmup: 0 → {beta_max} over {warmup_epochs} epochs")
+print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+print(f"Training for {num_epochs} epochs, beta warmup -> {beta_max} over {warmup_epochs} epochs")
+print(f"Shapes: input_dim={input_dim}, sequence_length={sequence_length}, n_locations={n_locations}")
+print(f"A_train.shape={A_train.shape}, C_train.shape={C_train.shape}")
 
 # ----------- TRAINING -----------
 for epoch in range(num_epochs):
@@ -134,8 +156,7 @@ for epoch in range(num_epochs):
     optimizer.step()
     
     if (epoch + 1) % 200 == 0:
-        print(f"Epoch {epoch+1}: Loss = {total_loss.item():.1f} (Recon = {recon_loss.item():.1f}, KL = {kl_loss.item():.1f}, β = {beta:.3f})")
-        
+        print(f"Epoch {epoch+1}: Loss={total_loss.item():.3f} Recon={recon_loss.item():.3f} KL={kl_loss.item():.3f} β={beta:.3f}")
 # --------------- SIMULATE THE MODEL USING DECODER ONLY -----------
 model.eval()
 with torch.no_grad():
@@ -145,7 +166,7 @@ with torch.no_grad():
     X_sim_phys = []   # Store in physical space
 
     for _ in range(n_samples):
-        z_sim = torch.randn(X_val.shape[0], latent_dim, device=C_val.device)  # Sample from prior ~ N(0, I)
+        z_sim = torch.randn(1, latent_dim, device=C_val.device)
         a_sim = model.decoder(z_sim, C_val)  # Decode to modal coordinates (B, 2, 4096)
         
         # Reconstruct back to physical DOFs: X = U @ a
@@ -165,11 +186,12 @@ with torch.no_grad():
 # Denormalize the mean simulation back to original scale
 X_sim_mean_denorm = X_sim_mean * normalisation_params['X_std'] + normalisation_params['X_mean']
 
-# Denormalize all simulation samples for uncertainty analysis  
+# Denormalize all simulation samples for uncertainty analysis
 X_sim_samples_denorm = X_sim * normalisation_params['X_std'] + normalisation_params['X_mean']
     
 # ----------- PLOTTING -----------
-fs_downsampled = fs / 2
+# Downsampled sampling frequency used for plotting (account for downsample_factor)
+fs_downsampled = fs / downsample_factor
 t = np.arange(sequence_length) / fs_downsampled
 
 # Setup figure with subplots (n_locations x 2 columns)
@@ -283,7 +305,6 @@ results_dict = {
     'training_levels': str(training_level),
     'validation_level': validation_level[0],
     'validation_force': C_val_raw[0],
-    'location_h': None,
     'location_i': location_i,
     'location_j': location_j,
     
