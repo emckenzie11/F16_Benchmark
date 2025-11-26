@@ -89,46 +89,50 @@ def save_results_to_tracker(results_dict, tracker_file='cVAE/results.xlsx'):
 
 
 def process_acceleration_data(data_dict, levels, location_i=None, location_j=None,
-                              points_per_period=8192, period_number=8, n_periods=1, downsample_factor=2):
+                              points_per_period=8192, downsample_factor=2, period_indices=None):
     """
-    Extract and process acceleration data from multiple levels.
+    Extract and process acceleration data from multiple levels and multiple periods.
+
+    This function requires `period_indices` to be provided: each 1-based period index in that
+    list is extracted and treated as an independent sample. The returned array has shape
+    (n_samples, 2, sequence_length) where n_samples = n_levels * len(period_indices)
+    and sequence_length = points_per_period // downsample_factor.
 
     Args:
         data_dict: Dictionary mapping level numbers to pandas DataFrames
-        levels: List of levels to process
+        levels: List of levels to process (order determines sample order in output)
         location_i: First DOF location to extract (wing side)
         location_j: Second DOF location to extract (payload side)
         points_per_period: Number of samples per period in the raw data (default 8192)
-        period_number: 1-based index of the first period to extract (default 8)
-        n_periods: Number of consecutive periods to extract (default 1)
         downsample_factor: Integer downsampling factor to apply after extraction (default 2)
+        period_indices: REQUIRED list of 1-based period indices to extract individually
 
     Returns:
-        np.ndarray: Array of shape (n_levels, 2, sequence_length) containing processed acceleration data
-                    where sequence_length = (points_per_period * n_periods) // downsample_factor
+        np.ndarray: Array of shape (n_samples, 2, sequence_length) containing processed acceleration data
     """
-    X = []
-    
+    if period_indices is None:
+        raise ValueError("period_indices must be provided (list of 1-based period indices)")
+
+    X_samples = []
+
     for level in levels:
-        # Always build list of acceleration arrays in order: [location_i, location_j]
+        # Build list of acceleration arrays in order: [location_i, location_j]
         accel_arrays = [
             data_dict[level][f'Acceleration{location_i}'].to_numpy(),  # Row 0: Location i (wing side)
             data_dict[level][f'Acceleration{location_j}'].to_numpy(),  # Row 1: Location j (payload side)
         ]
-        
-        accel_matrix = np.vstack(accel_arrays)
 
-        # Determine indices for requested period(s)
-        # period_number is 1-based, so convert to 0-based index
-        start_idx = (period_number - 1) * points_per_period
-        end_idx = start_idx + n_periods * points_per_period
+        accel_matrix = np.vstack(accel_arrays)  # shape (2, total_samples)
 
-        # Extract requested period block and downsample by provided factor
-        accel_matrix = accel_matrix[:, start_idx:end_idx][:, ::downsample_factor]
+        # Extract each specified period as an independent sample
+        for p in period_indices:
+            # p is 1-based
+            start_idx = (p - 1) * points_per_period
+            end_idx = start_idx + points_per_period
+            block = accel_matrix[:, start_idx:end_idx][:, ::downsample_factor]
+            X_samples.append(block)
 
-        X.append(accel_matrix)
-    
-    return np.array(X)
+    return np.array(X_samples)
 
 
 def normalise_data(data, mean=None, std=None):
