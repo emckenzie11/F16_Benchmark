@@ -1,0 +1,108 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# ----------- USER CONFIGURATION -----------
+
+# Plot configuration
+levels_to_compute = [1, 2, 3, 4, 5, 6, 7]  # Levels to compute
+location_1 = 1                             # DOF 1 (location where acceleration is measured)
+location_2 = 2                             # DOF 2 (location on wing side of the nonlinear connection)
+location_3 = 3                             # DOF 3 (location across the nonlinear connection)
+
+# Data parameters
+fs = 400                                # Sampling frequency in Hz
+dt = 1 / fs                             # Time step
+N_per_period = 8192                     # Number of dpoints per period
+N_periods = 9                           # Number of periods
+N_total = N_per_period * N_periods      # Total number of data points    
+
+# Signal type
+signal_type = 'FullMSine'  # 'SineSw' or 'FullMSine' or 'SpecialOddMSine'
+
+# Input 
+data = {
+    1: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level1.csv'),
+    2: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level2_Validation.csv'),
+    3: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level3.csv'),
+    4: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level4_Validation.csv'),
+    5: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level5.csv'),
+    6: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level6_Validation.csv'),
+    7: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level7.csv')
+}
+
+# ----------- CALCULATE TRANSMISSIBILITY -----------
+
+# Function to compute transmissibility for a dataset, discarding first period
+def compute_transmissibility(data, location_ref='Acceleration1', location_target='Acceleration2'):
+    """
+    Compute averaged FFT transmissibility target/ref using periods 2..9.
+
+    Args:
+        data: pandas DataFrame with acceleration columns
+        location_ref: column name used as reference (denominator)
+        location_target: column name used as target (numerator)
+
+    Returns:
+        freqs_pos, T_mag_dB, T_phase
+    """
+    # Initialize sums for averaging FFTs
+    fft_ref_sum = np.zeros(N_per_period, dtype=complex)
+    fft_target_sum = np.zeros(N_per_period, dtype=complex)
+
+    # Average FFTs over periods 2..9 (indices 1..8)
+    for n in range(1, 9):
+        start_idx = N_per_period * n
+        end_idx = N_per_period * (n + 1)
+
+        fft_ref = np.fft.fft(data[location_ref][start_idx:end_idx])
+        fft_target = np.fft.fft(data[location_target][start_idx:end_idx])
+
+        fft_ref_sum += fft_ref
+        fft_target_sum += fft_target
+
+    fft_ref_avg = fft_ref_sum / 8
+    fft_target_avg = fft_target_sum / 8
+
+    # Compute transmissibility: target / ref
+    T = fft_target_avg / fft_ref_avg
+
+    # Positive frequency vector
+    freqs = np.fft.fftfreq(N_per_period, dt)
+    freqs_pos = freqs[:N_per_period // 2]
+
+    T_mag = np.abs(T[:N_per_period // 2])
+    T_phase = np.angle(T[:N_per_period // 2])
+
+    # Convert to dB (avoid log(0))
+    T_mag_dB = 20 * np.log10(T_mag + 1e-10)
+
+    return freqs_pos, T_mag_dB, T_phase
+
+#----------- COMPUTE AND PLOT RESULTS -----------
+
+# Compute transmissibility for each requested level and store results
+results = {}
+for lvl in levels_to_compute:
+    freqs_pos_21, T_mag_dB_21, T_phase_21 = compute_transmissibility(data[lvl], location_ref='Acceleration1', location_target='Acceleration2')
+    results[lvl] = {
+        'freqs_21': freqs_pos_21,
+        'T_mag_dB_21': T_mag_dB_21,
+        'T_phase_21': T_phase_21,
+    }
+
+plt.figure(figsize=(12, 10))
+
+for lvl in levels_to_compute:
+    r = results[lvl]
+    plt.plot(r['freqs_21'], r['T_mag_dB_21'], label=f'Level {lvl}')
+
+plt.ylabel('Transmissibility |T| (dB)')
+plt.title('Transmissibility Magnitude (dB) — Wing Tip Acceleration / Shaker Acceleration')
+plt.grid(True, which='both', ls='--', alpha=0.4)
+plt.legend(loc='upper right')
+plt.xlim(2, 15)
+
+plt.tight_layout()
+plt.show()

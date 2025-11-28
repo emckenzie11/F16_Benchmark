@@ -1,0 +1,180 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# ----------- USER CONFIGURATION -----------
+
+# Plot configuration
+levels_to_compute = [1, 2, 3, 4, 5, 6, 7]  # Levels to compute
+location_1 = 1                             # DOF 1 (location where acceleration is measured)
+location_2 = 2                             # DOF 2 (location on wing side of the nonlinear connection)
+location_3 = 3                             # DOF 3 (location across the nonlinear connection)
+
+# Data parameters
+fs = 400                                # Sampling frequency in Hz
+dt = 1 / fs                             # Time step
+N_per_period = 8192                     # Number of dpoints per period
+N_periods = 9                           # Number of periods
+N_total = N_per_period * N_periods      # Total number of data points    
+
+# Signal type
+signal_type = 'FullMSine'  # 'SineSw' or 'FullMSine' or 'SpecialOddMSine'
+
+# Input 
+data = {
+    1: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level1.csv'),
+    2: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level2_Validation.csv'),
+    3: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level3.csv'),
+    4: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level4_Validation.csv'),
+    5: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level5.csv'),
+    6: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level6_Validation.csv'),
+    7: pd.read_csv(f'BenchmarkData/F16Data_{signal_type}_Level7.csv')
+}
+
+# ----------- CALCULATE TRANSMISSIBILITY -----------
+
+# Function to compute transmissibility for a dataset, discarding first period
+def compute_transmissibility(data, location_ref='Acceleration1', location_target='Acceleration2'):
+    """
+    Compute averaged FFT transmissibility target/ref using periods 2..9 and
+    also compute the magnitude-squared coherence between the two signals.
+
+    Args:
+        data: pandas DataFrame with acceleration columns
+        location_ref: column name used as reference (denominator)
+        location_target: column name used as target (numerator)
+
+    Returns:
+        freqs_pos, T_mag_dB, T_phase, coherence
+            - freqs_pos: positive frequency vector
+            - T_mag_dB: transmissibility magnitude in dB (positive freqs)
+            - T_phase: transmissibility phase (rad, positive freqs)
+            - coherence: magnitude-squared coherence (0..1) at positive freqs
+    """
+    # Initialize sums for averaging FFTs and spectra
+    fft_ref_sum = np.zeros(N_per_period, dtype=complex)
+    fft_target_sum = np.zeros(N_per_period, dtype=complex)
+    S_xx_sum = np.zeros(N_per_period, dtype=complex)
+    S_yy_sum = np.zeros(N_per_period, dtype=complex)
+    S_xy_sum = np.zeros(N_per_period, dtype=complex)
+
+    # Average FFTs and spectra over periods 2..9 (indices 1..8)
+    n_periods_used = 0
+    for n in range(1, 9):
+        start_idx = N_per_period * n
+        end_idx = N_per_period * (n + 1)
+
+        x = data[location_ref][start_idx:end_idx].to_numpy()
+        y = data[location_target][start_idx:end_idx].to_numpy()
+
+        fft_ref = np.fft.fft(x)
+        fft_target = np.fft.fft(y)
+
+        fft_ref_sum += fft_ref
+        fft_target_sum += fft_target
+
+        # Autospectra and cross-spectrum (unnormalized). Normalization cancels in coherence.
+        S_xx_sum += fft_ref * np.conj(fft_ref)
+        S_yy_sum += fft_target * np.conj(fft_target)
+        S_xy_sum += fft_target * np.conj(fft_ref)
+
+        n_periods_used += 1
+
+    # Compute averages
+    fft_ref_avg = fft_ref_sum / float(n_periods_used)
+    fft_target_avg = fft_target_sum / float(n_periods_used)
+    S_xx_avg = S_xx_sum / float(n_periods_used)
+    S_yy_avg = S_yy_sum / float(n_periods_used)
+    S_xy_avg = S_xy_sum / float(n_periods_used)
+
+    # Compute transmissibility: target / ref
+    T = fft_target_avg / (fft_ref_avg + 1e-16)
+
+    # Positive frequency vector
+    freqs = np.fft.fftfreq(N_per_period, dt)
+    freqs_pos = freqs[: N_per_period // 2]
+
+    T_mag = np.abs(T[: N_per_period // 2])
+    T_phase = np.angle(T[: N_per_period // 2])
+
+    # Convert to dB (avoid log(0))
+    T_mag_dB = 20 * np.log10(T_mag + 1e-10)
+
+    # Coherence: |S_xy|^2 / (S_xx * S_yy)
+    eps = 1e-20
+    coherence_full = np.abs(S_xy_avg) ** 2 / (S_xx_avg * S_yy_avg + eps)
+    coherence = np.real(coherence_full[: N_per_period // 2])
+
+    # Clip coherence to [0,1] to avoid numerical overshoot
+    coherence = np.clip(coherence, 0.0, 1.0)
+
+    return freqs_pos, T_mag_dB, T_phase, coherence
+
+#----------- COMPUTE AND PLOT RESULTS -----------
+
+# Compute transmissibility for each requested level and store results
+results = {}
+for lvl in levels_to_compute:
+    freqs_pos_21, T_mag_dB_21, T_phase_21, coh_21 = compute_transmissibility(data[lvl], location_ref='Acceleration1', location_target='Acceleration2')
+    freqs_pos_23, T_mag_dB_23, T_phase_23, coh_23 = compute_transmissibility(data[lvl], location_ref='Acceleration3', location_target='Acceleration2')
+    results[lvl] = {
+        'freqs_21': freqs_pos_21,
+        'T_mag_dB_21': T_mag_dB_21,
+        'T_phase_21': T_phase_21,
+        'coh_21': coh_21,
+        'freqs_23': freqs_pos_23,
+        'T_mag_dB_23': T_mag_dB_23,
+        'T_phase_23': T_phase_23,
+        'coh_23': coh_23
+    }
+
+# Create two stacked subplots: top = Location2 / Location1, bottom = Location2 / Location3
+fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
+
+# Ax0: Location2 / Location1 transmissibility magnitude
+ax0 = axes[0]
+for lvl in levels_to_compute:
+    r = results[lvl]
+    ax0.plot(r['freqs_21'], r['T_mag_dB_21'], label=f'Level {lvl}')
+ax0.set_ylabel('Transmissibility |T| (dB)')
+ax0.set_title('Transmissibility Magnitude (dB) — Location 2 / Location 1')
+ax0.grid(True, which='both', ls='--', alpha=0.4)
+ax0.legend(loc='upper right')
+ax0.set_xlim(2, 15)
+
+# Ax1: Location2 / Location1 coherence
+ax1 = axes[1]
+for lvl in levels_to_compute:
+    r = results[lvl]
+    ax1.plot(r['freqs_21'], r['coh_21'], label=f'Level {lvl}')
+ax1.set_ylabel('Coherence')
+ax1.set_ylim(0, 1)
+ax1.grid(True, which='both', ls='--', alpha=0.4)
+ax1.legend(loc='upper right')
+
+# Ax2: Location2 / Location3 transmissibility magnitude
+ax2 = axes[2]
+for lvl in levels_to_compute:
+    r = results[lvl]
+    ax2.plot(r['freqs_23'], r['T_mag_dB_23'], label=f'Level {lvl}')
+ax2.set_ylabel('Transmissibility |T| (dB)')
+ax2.set_title('Transmissibility Magnitude (dB) — Location 2 / Location 3')
+ax2.grid(True, which='both', ls='--', alpha=0.4)
+ax2.legend(loc='upper right')
+ax2.set_xlim(2, 15)
+
+# Ax3: Location2 / Location3 coherence
+ax3 = axes[3]
+for lvl in levels_to_compute:
+    r = results[lvl]
+    ax3.plot(r['freqs_23'], r['coh_23'], label=f'Level {lvl}')
+ax3.set_xlabel('Frequency (Hz)')
+ax3.set_ylabel('Coherence')
+ax3.set_ylim(0, 1)
+ax3.grid(True, which='both', ls='--', alpha=0.4)
+ax3.legend(loc='upper right')
+ax3.set_xlim(2, 15)
+
+plt.tight_layout()
+plt.show()

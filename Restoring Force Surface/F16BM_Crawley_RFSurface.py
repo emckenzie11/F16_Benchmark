@@ -12,7 +12,6 @@ from scipy.signal import savgol_filter
 levels_to_compute = [7]        # Levels to compute RFS (choose 1,3,5,7)
 location_i = 2                 # DOF i (accel measurement)
 location_j = 3                 # DOF j (across connection)
-surface_on_grid = True
 show_scatter = False
 
 fs = 400
@@ -23,6 +22,8 @@ freq_low = 6.8
 freq_high = 8.6
 
 m_eff = 1.0
+
+grid = 20               # CO surface grid size
 
 data_dict = {
     1: pd.read_csv("BenchmarkData/F16Data_SineSw_Level1.csv"),
@@ -193,7 +194,7 @@ for level in levels_to_compute:
 # ------------------------------------------------------------
 #  3D PLOTTING
 # ------------------------------------------------------------
-def plot_CO_surface(level, grid_size=70):
+def plot_CO_surface(level, grid_size=grid):
     rel_disp = rfs_data[level]['rel_disp']
     rel_vel  = rfs_data[level]['rel_vel']
     R        = rfs_data[level]['restoring_force']
@@ -207,7 +208,7 @@ def plot_CO_surface(level, grid_size=70):
     fig = go.Figure()
 
     # Plot wireframe (CO surfaces were always a wire grid)
-    for i in range(grid_size):
+    for i in range(grid):
         zrow = Fgrid[i,:]
         mask = pop[i,:] == 1
         fig.add_trace(go.Scatter3d(
@@ -216,7 +217,7 @@ def plot_CO_surface(level, grid_size=70):
             showlegend=False
         ))
 
-    for j in range(grid_size):
+    for j in range(grid):
         zcol = Fgrid[:,j]
         mask = pop[:,j] == 1
         fig.add_trace(go.Scatter3d(
@@ -253,7 +254,7 @@ def plot_CO_surface(level, grid_size=70):
 os.makedirs("Figures/RestoringForce3D", exist_ok=True)
 
 for level in levels_to_compute:
-    fig = plot_CO_surface(level, grid_size=20)
+    fig = plot_CO_surface(level, grid_size=grid)
     fname = f"Figures/RestoringForce3D/RestoringForce_Level{level}_Crawley_Grid.html"
     fig.write_html(fname)
     print(f"Exported -> {fname}")
