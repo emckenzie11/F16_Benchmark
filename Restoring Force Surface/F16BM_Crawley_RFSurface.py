@@ -9,10 +9,10 @@ from scipy.signal import savgol_filter
 # ------------------------------------------------------------
 # USER SETTINGS
 # ------------------------------------------------------------
-levels_to_compute = [7]        # Levels to compute RFS (choose 1,3,5,7)
+levels_to_compute = [1]        # Levels to compute RFS (choose 1,3,5,7)
 location_i = 2                 # DOF i (accel measurement)
 location_j = 3                 # DOF j (across connection)
-show_scatter = False
+show_scatter = True
 
 fs = 400
 dt = 1/fs
@@ -21,7 +21,7 @@ target_freq = 7.3
 freq_low = 6.8
 freq_high = 8.6
 
-m_eff = 1.0
+m_eff = 20.67
 
 grid = 20               # CO surface grid size
 
@@ -174,7 +174,7 @@ for level in levels_to_compute:
     accel_j_bp = bandpass_filter(accel_j, freq_low, freq_high, fs)
 
     x_rel, v_rel = compute_relative_motion(accel_i_bp, accel_j_bp, fs, freq_low, freq_high)
-    R = compute_restoring_force(accel_i_bp, m_eff)
+    R = compute_restoring_force(accel_j_bp, m_eff)
     
     # Smooth displacement, velocity, and force
     # Window length must be odd; tune between 51–201 depending on fs
@@ -231,7 +231,7 @@ def plot_CO_surface(level, grid_size=grid):
         fig.add_trace(go.Scatter3d(
             x=rel_disp, y=rel_vel, z=R,
             mode="markers",
-            marker=dict(size=2, color="red", opacity=0.3)
+            marker=dict(size=2, color="red", opacity=0.2)
         ))
 
     fig.update_layout(

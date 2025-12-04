@@ -1,3 +1,6 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,16 +10,19 @@ from helpers import process_acceleration_data, normalise_data
 
 # ----------- USER CONFIGURATION -----------
 # Validation level
-validation_level = [6]
+validation_level = [2]  # Level to use for validation (Options: 2, 4, 6)
 
 # User-configurable data-shape parameters
-training_period_indices = list(range(3, 9))  # periods 3 through 8 inclusive 
+training_period_indices = list(range(3, 10))  # periods 3 through 9 inclusive 
 downsample_factor = 2   
 
 # Training parameters
 num_epochs = 1200
-beta_max = 0.5
-warmup_epochs = 100  
+
+# Loss weights
+weight_recon = 1.0      # Reconstruction loss weight
+weight_rf = 0.5         # Restoring force loss weight
+weight_kl = 0.5         # KL divergence weight  
 
 # ----------- PARAMETERS -----------
 # Data levels and locations
@@ -32,7 +38,11 @@ force_levels = {2: 24.6, 4: 61.4, 6: 85.7}
 
 # Data parameters
 fs = 400             
-dt = 1 / fs           
+dt = 1 / fs
+
+# Restoring force parameters
+freq_low = 6.8          # Band-pass filter low frequency
+freq_high = 8.6         # Band-pass filter high frequency           
 
 # Data shape parameters
 points_per_period = 8192
@@ -95,26 +105,13 @@ C_val_raw = np.array([force_levels[validation_level[0]]])  # Get condition  for 
 C_val_normalised = (C_val_raw - C_mean) / C_std
 C_val = torch.tensor(C_val_normalised, dtype=torch.float32).unsqueeze(-1)  # Force conditions (1, 1)
 
-# ----------- POD COMPUTATION -----------
-# Build snapshot matrix S by concatenating samples along the snapshot axis
-S = np.concatenate([X_normalised[i] for i in range(X_normalised.shape[0])], axis=1)
-
-# Compute SVD: S = U * Σ * V^T
-U, Sigma, VT = np.linalg.svd(S, full_matrices=False)
-
-# POD Modes (spatial)
-energies = Sigma**2
-energy_frac = energies / energies.sum()
+# ----------- PREPARE TRAINING DATA -----------
 print("-" * 60)
-print(f"POD mode: {U}; Energy fraction: {energy_frac[:min(6,len(energy_frac))]}")
+print(f"Training on {X_normalised.shape[0]} samples directly in physical space")
+print(f"Sample shape: {X_normalised.shape[1:]} (n_locations, sequence_length)")
 
-# Modal coefficients: compute for every extracted sample (period)
-modal_list = [U.T @ X_normalised[i] for i in range(X_normalised.shape[0])]  # list of (n_modes, sequence_length)
-A = np.stack(modal_list, axis=0)  # Shape: (n_samples, n_modes, sequence_length)
-
-# Convert to PyTorch tensors
-U_torch = torch.tensor(U, dtype=torch.float32)
-A_train = torch.tensor(A, dtype=torch.float32)  # Modal coefficients (n_samples, n_modes, sequence_length)
+# Convert to PyTorch tensors - work directly in physical space
+X_train = torch.tensor(X_normalised, dtype=torch.float32)  # (n_samples, 2, sequence_length)
 
 # Expand and normalise conditioning to match training samples
 C_normalised_expanded = (C_raw - C_mean) / C_std
@@ -132,51 +129,50 @@ print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requir
 for epoch in range(num_epochs):
     model.train()
     
-    # Beta warmup schedule
-    if epoch < warmup_epochs:
-        beta = beta_max * (epoch / warmup_epochs)  # Linear warmup
-    else:
-        beta = beta_max
+    # Forward pass: model learns in physical space
+    X_train_recon, mu_train, logvar_train, z_train = model(X_train, C_train)
     
-    # Forward pass: model learns in POD modal space
-    A_train_recon, mu_train, logvar_train, z_train = model(A_train, C_train)
+    # Reconstruction loss (MSE on accelerations)
+    recon_loss = torch.nn.functional.mse_loss(X_train_recon, X_train, reduction='sum')
     
-    # Loss in physical space (acceleration coordinates)
-    total_loss, recon_loss, kl_loss = cvae_loss(A_train_recon, A_train, mu_train, logvar_train, beta)
+    # Restoring force loss: compute RF from both real and reconstructed accelerations
+    # RF = -m_eff * accel_j (using location_j which is index 1 in our 2-location setup)
+    RF_true = X_train[:, 1, :]  # (n_samples, sequence_length)
+    RF_recon = X_train_recon[:, 1, :]  # (n_samples, sequence_length)
+    rf_loss = torch.nn.functional.mse_loss(RF_recon, RF_true, reduction='sum')
+    
+    # KL divergence loss
+    kl_loss = -0.5 * torch.sum(1 + logvar_train - mu_train.pow(2) - logvar_train.exp())
+    
+    # Total weighted loss
+    total_loss = weight_recon * recon_loss + weight_rf * rf_loss + weight_kl * kl_loss
     
     optimizer.zero_grad()
     total_loss.backward()
     optimizer.step()
     
     if (epoch + 1) % 200 == 0:
-        print(f"Epoch {epoch+1}: Loss={total_loss.item():.3f} Recon={recon_loss.item():.3f} KL={kl_loss.item():.3f} β={beta:.3f}")
+        print(f"Epoch {epoch+1}: Loss={total_loss.item():.3f} Recon={recon_loss.item():.3f} RF={rf_loss.item():.3f} KL={kl_loss.item():.3f}")
         
 # --------------- SIMULATE THE MODEL USING DECODER ONLY -----------
 model.eval()
 with torch.no_grad():
     # Generate multiple stochastic reconstructions using decoder only
     n_samples = 50
-    X_sim_modal = []  # Store in modal space
-    X_sim_phys = []   # Store in physical space
+    X_sim_list = []  # Store in physical space
 
     for _ in range(n_samples):
         z_sim = torch.randn(1, latent_dim, device=C_val.device)
-        a_sim = model.decoder(z_sim, C_val)  # Decode to modal coordinates (B, 2, 4096)
-        
-        # Reconstruct back to physical DOFs: X = U @ a
-        X_sim = torch.einsum('cr,brt->bct', U_torch, a_sim)  # (B, 2, 4096)
-        
-        X_sim_modal.append(a_sim.cpu().numpy())
-        X_sim_phys.append(X_sim.cpu().numpy())
+        X_sim = model.decoder(z_sim, C_val)  # Decode to physical coordinates (B, 2, 4096)
+        X_sim_list.append(X_sim.cpu().numpy())
 
     # Stack samples
-    X_sim_modal = np.array(X_sim_modal)  # (n_samples, batch, 2, 4096) in modal space
-    X_sim = np.array(X_sim_phys)          # (n_samples, batch, 2, 4096) in physical space
+    X_sim = np.array(X_sim_list)  # (n_samples, batch, 2, 4096) in physical space
 
-    # Calculate mean reconstruction from samples (in physical space)
+    # Calculate mean reconstruction from samples
     X_sim_mean = X_sim.mean(axis=0)                 
 
-# --------------- DEnormalise FOR ANALYSIS -----------
+# --------------- DENORMALISE FOR ANALYSIS -----------
 # Denormalise the mean simulation back to original scale
 X_sim_mean_denorm = X_sim_mean * normalisation_params['X_std'] + normalisation_params['X_mean']
 
@@ -294,9 +290,10 @@ results_dict = {
     
     # Training parameters
     'num_epochs': num_epochs,
-    'beta_max': beta_max,
-    'warmup_epochs': warmup_epochs,
     'learning_rate': 1e-3,
+    'weight_recon': weight_recon,
+    'weight_rf': weight_rf,
+    'weight_kl': weight_kl,
     
     # Data configuration
     'training_levels': str(training_level),
@@ -311,11 +308,12 @@ results_dict = {
     
     # Model info
     'model_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad),
-    'loss_computation': 'modal_space',
+    'loss_computation': 'physical_space_with_RF',
     
     # Final training loss (if available)
     'final_total_loss': total_loss.item() if 'total_loss' in locals() else None,
     'final_recon_loss': recon_loss.item() if 'recon_loss' in locals() else None,
+    'final_rf_loss': rf_loss.item() if 'rf_loss' in locals() else None,
     'final_kl_loss': kl_loss.item() if 'kl_loss' in locals() else None,
 }
 

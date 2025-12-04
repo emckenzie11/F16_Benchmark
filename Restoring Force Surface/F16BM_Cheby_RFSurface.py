@@ -17,7 +17,7 @@ location_j = 3  # DOF j (location across the nonlinear connection)
 # Surface fitting parameters
 chebyshev_order = 4   # Polynomial order for Chebyshev surface fit (lower = smoother, more stable)
 grid_size = 50        # Grid resolution for surface plot
-show_scatter = False   # Toggle scatter data points on/off in 3D plot
+show_scatter = True   # Toggle scatter data points on/off in 3D plot
 surface_on_grid = True  # If True, plot surface on grid; if False, plot surface only at data points
 
 # Data parameters
@@ -30,7 +30,7 @@ freq_low = 6.8        # Lower frequency bound [Hz]
 freq_high = 8.6       # Upper frequency bound [Hz]
 
 # Effective mass (normalized).
-m_eff = 1.0
+m_eff = 20.67
 
 # Input CSVs
 data_dict = {
@@ -248,7 +248,7 @@ for level in levels_to_compute:
     rel_disp, rel_vel = compute_relative_motion(accel_i_bp, accel_j_bp, fs, freq_low, freq_high)
 
     # Restoring force proxy (use band-passed a_i; scale by mass if known)
-    restoring_force = compute_restoring_force(accel_i_bp, m_eff=m_eff)
+    restoring_force = compute_restoring_force(accel_j_bp, m_eff=m_eff)
 
     # Store results (simplified for 3D plotting)
     rfs_data[level] = {
@@ -346,7 +346,7 @@ def plot_3d_restoring_force_surface(level, title_suffix="", grid_size=50, chebys
             y=rel_vel,
             z=R,
             mode='markers',
-            marker=dict(size=1, color='black', opacity=0.3),
+            marker=dict(size=1, color='red', opacity=0.5),
             name='Data Points'
         ))
     # Set custom camera angle for better perspective (State 1)
