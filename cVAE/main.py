@@ -1,25 +1,25 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from architecture import cVAE, cvae_loss
-from helpers import process_acceleration_data, normalise_data
+from helpers import process_data, normalise_data, downsample_signal
 
 # ----------- USER CONFIGURATION -----------
 # Validation level
-validation_level = [2]  # Level to use for validation (Options: 2, 4, 6)
+validation_level = [6]  # Level to use for validation (Options: 2, 4, 6)
 
 # User-configurable data-shape parameters
 training_period_indices = list(range(3, 10))  # periods 3 through 9 inclusive 
-downsample_factor = 2   
+downsample_factor_accel = 2   # Downsampling for acceleration signals
+downsample_factor_force = 8   # Downsampling for force signal 
 
 # Training parameters
 num_epochs = 1200
-
-# Loss weights
-weight_recon = 1.0      # Reconstruction loss weight
-weight_rf = 0.5         # Restoring force loss weight
-weight_kl = 0.5         # KL divergence weight  
+beta = 0.5  # Weight for KL divergence in cVAE loss
 
 # ----------- PARAMETERS -----------
 # Data levels and locations
@@ -27,31 +27,17 @@ training_level = [1, 3, 5, 7]
 location_i = 2  
 location_j = 3  
 
-# Force mapping for training levels (N)
-force_map = {1: 12.4, 3: 36.8, 5: 73.6, 7: 97.8}
-
-# Force mapping for validation levels (N)
-force_levels = {2: 24.6, 4: 61.4, 6: 85.7} 
-
-# Effective mass
-m_eff_j = 1.0 
-
 # Data parameters
 fs = 400             
-dt = 1 / fs
-
-# Restoring force parameters
-freq_low = 6.8          # Band-pass filter low frequency
-freq_high = 8.6         # Band-pass filter high frequency           
+dt = 1 / fs          
 
 # Data shape parameters
 points_per_period = 8192
 
 # Model parameters
 latent_dim = 32         
-sequence_length = points_per_period // downsample_factor
-n_locations = 2         
-condition_dim = 1        
+sequence_length_accel = points_per_period // downsample_factor_accel
+sequence_length_force = points_per_period // downsample_factor_force         
 
 # ----------- LOAD DATA -----------
 training_data = {
@@ -72,55 +58,47 @@ training_data = {lvl: training_data[lvl] for lvl in training_level}
 validation_data = {lvl: validation_data[lvl] for lvl in validation_level}
 
 # ----------- PROCESS DATA -----------
-# Extract per-period samples for training. Each period becomes an independent sample.
-X_raw = process_acceleration_data(training_data, training_level,
-                                  location_i=location_i, location_j=location_j,
-                                  points_per_period=points_per_period,
-                                  downsample_factor=downsample_factor,
-                                  period_indices=training_period_indices)
+# Extract per-period samples for training
+X_raw, F_raw = process_data(training_data, training_level,
+                             period_indices=training_period_indices)
 
-# Validation: keep previous behaviour (extract contiguous block or single period)
-X_val_raw = process_acceleration_data(validation_data, validation_level,
-                                      location_i=location_i, location_j=location_j,
-                                      points_per_period=points_per_period,
-                                      downsample_factor=downsample_factor,
-                                      period_indices=training_period_indices)
+# Validation data
+X_val_raw, F_val_raw = process_data(validation_data, validation_level,
+                                     period_indices=training_period_indices)
 
-# Expand condition vector so each period is an independent sample at the same force level
-n_periods_used = len(training_period_indices)
-C_raw = np.repeat([force_map[l] for l in training_level], repeats=n_periods_used)
+# Downsample signals
+X_raw = downsample_signal(X_raw, downsample_factor_accel, axis=-1)
+F_raw = downsample_signal(F_raw, downsample_factor_force, axis=-1)
+X_val_raw = downsample_signal(X_val_raw, downsample_factor_accel, axis=-1)
+F_val_raw = downsample_signal(F_val_raw, downsample_factor_force, axis=-1)
 
-# Normalise acceleration data and conditions
+# Normalise acceleration data and force signals
 X_normalised, X_mean, X_std = normalise_data(X_raw)
-C_normalised, C_mean, C_std = normalise_data(C_raw)
+F_normalised, F_mean, F_std = normalise_data(F_raw)
 
 # Store normalisation parameters
 normalisation_params = {
     'X_mean': X_mean, 'X_std': X_std,
-    'C_mean': C_mean, 'C_std': C_std,
+    'F_mean': F_mean, 'F_std': F_std,
 }
 
-# Normalise validation using training statistics to keep conditioning consistent
-C_val_raw = np.array([force_levels[validation_level[0]]])  # Get condition  for selected validation level
-C_val_normalised = (C_val_raw - C_mean) / C_std
-C_val = torch.tensor(C_val_normalised, dtype=torch.float32).unsqueeze(-1)  # Force conditions (1, 1)
+# Normalise validation force using training statistics
+F_val_normalised = (F_val_raw - F_mean) / F_std
+F_val = torch.tensor(F_val_normalised, dtype=torch.float32)  # (n_val_samples, sequence_length)
 
 # ----------- PREPARE TRAINING DATA -----------
 print("-" * 60)
-print(f"Training on {X_normalised.shape[0]} samples directly in physical space")
-print(f"Sample shape: {X_normalised.shape[1:]} (n_locations, sequence_length)")
+print(f"Training Data Shape: {X_normalised.shape}")
+print(f"Force Condition shape: {F_normalised.shape}")
 
-# Convert to PyTorch tensors - work directly in physical space
+# Convert to PyTorch tensors
 X_train = torch.tensor(X_normalised, dtype=torch.float32)  # (n_samples, 2, sequence_length)
-
-# Expand and normalise conditioning to match training samples
-C_normalised_expanded = (C_raw - C_mean) / C_std
-C_train = torch.tensor(C_normalised_expanded, dtype=torch.float32).unsqueeze(-1)  # Force conditions (n_samples, 1)
+F_train = torch.tensor(F_normalised, dtype=torch.float32)  # (n_samples, sequence_length)
 
 # ----------- TRAINING SETUP -----------
-# Ensure model input dimension matches (n_locations * sequence_length)
-input_dim = n_locations * sequence_length
-model = cVAE(latent_dim=latent_dim, input_dim=input_dim, n_locations=n_locations, sequence_length=sequence_length)
+model = cVAE(latent_dim=latent_dim, n_locations=2, 
+             sequence_length_accel=sequence_length_accel, 
+             sequence_length_force=sequence_length_force)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 print("-" * 60)
 print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
@@ -129,27 +107,18 @@ print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requir
 for epoch in range(num_epochs):
     model.train()
     
-    # Forward pass: model learns in physical space
-    X_train_recon, mu_train, logvar_train, z_train = model(X_train, C_train)
+    # Forward pass: model learns in physical space with force signal conditioning
+    X_train_recon, mu_train, logvar_train, z_train = model(X_train, F_train)
     
-    # Extract restoring forces from location_j (index 1 in 2-location setup)
-    RF_true = -m_eff_j*X_train[:, 1, :]  # (n_samples, sequence_length)
-    RF_recon = -m_eff_j*X_train_recon[:, 1, :]  # (n_samples, sequence_length)
-    
-    # Compute loss using cvae_loss function with restoring force term
-    total_loss, recon_loss, rf_loss, kl_loss = cvae_loss(
-        X_train_recon, X_train, RF_recon, RF_true, mu_train, logvar_train,
-        weight_recon=weight_recon,
-        weight_rf=weight_rf,
-        weight_kl=weight_kl
-    )
+    # Compute cVAE loss in physical space
+    total_loss, recon_loss, kl_loss = cvae_loss(X_train_recon, X_train, mu_train, logvar_train, beta=beta)
     
     optimizer.zero_grad()
     total_loss.backward()
     optimizer.step()
     
     if (epoch + 1) % 200 == 0:
-        print(f"Epoch {epoch+1}: Loss={total_loss.item():.3f} Recon={recon_loss.item():.3f} RF={rf_loss.item():.3f} KL={kl_loss.item():.3f}")
+        print(f"Epoch {epoch+1}: Loss={total_loss.item():.3f} Recon={recon_loss.item():.3f} KL={kl_loss.item():.3f}")
         
 # --------------- SIMULATE THE MODEL USING DECODER ONLY -----------
 model.eval()
@@ -158,13 +127,16 @@ with torch.no_grad():
     n_samples = 50
     X_sim_list = []  # Store in physical space
 
+    # Use first validation sample's force signal for conditioning
+    F_val_single = F_val[0:1]  # (1, sequence_length)
+
     for _ in range(n_samples):
-        z_sim = torch.randn(1, latent_dim, device=C_val.device)
-        X_sim = model.decoder(z_sim, C_val)  # Decode to physical coordinates (B, 2, 4096)
+        z_sim = torch.randn(1, latent_dim, device=F_val_single.device)
+        X_sim = model.decoder(z_sim, F_val_single)  # Decode to physical coordinates (B, 2, sequence_length)
         X_sim_list.append(X_sim.cpu().numpy())
 
     # Stack samples
-    X_sim = np.array(X_sim_list)  # (n_samples, batch, 2, 4096) in physical space
+    X_sim = np.array(X_sim_list)  # (n_samples, batch, 2, sequence_length) in physical space
 
     # Calculate mean reconstruction from samples
     X_sim_mean = X_sim.mean(axis=0)                 
@@ -177,19 +149,19 @@ X_sim_mean_denorm = X_sim_mean * normalisation_params['X_std'] + normalisation_p
 X_sim_samples_denorm = X_sim * normalisation_params['X_std'] + normalisation_params['X_mean']
     
 # ----------- PLOTTING -----------
-# Downsampled sampling frequency used for plotting (account for downsample_factor)
-fs_downsampled = fs / downsample_factor
-t = np.arange(sequence_length) / fs_downsampled
+# Downsampled sampling frequency used for plotting (account for downsample_factor_accel)
+fs_downsampled = fs / downsample_factor_accel
+t = np.arange(sequence_length_accel) / fs_downsampled
 
-# Setup figure with subplots (n_locations x 2 columns)
-fig, axes = plt.subplots(n_locations, 2, figsize=(15, 5 * n_locations))
-fig.suptitle(f'cVAE Reconstruction: Simulated vs Validation Data\nLevel {validation_level[0]} (Force: {C_val_raw[0]:.1f}N)', fontsize=16, fontweight='bold')
+# Setup figure with subplots (2 locations x 2 columns)
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+fig.suptitle(f'cVAE Reconstruction: Simulated vs Validation Data\nLevel {validation_level[0]}', fontsize=16, fontweight='bold')
 
 # Location names for plotting (only i and j remain)
 location_names = [f'Location {location_i} (Wing Side)', f'Location {location_j} (Payload Side)']
 
 # Plot both locations
-for loc_idx in range(n_locations):
+for loc_idx in range(2):
     # Time domain plot with variance
     ax_time = axes[loc_idx, 0]
     
@@ -209,7 +181,7 @@ for loc_idx in range(n_locations):
     ax_time.fill_between(t, X_sim_mean_denorm[0, loc_idx, :] - 2*sim_sample_std, X_sim_mean_denorm[0, loc_idx, :] + 2*sim_sample_std,
                          color='red', alpha=0.1, label='±2σ Uncertainty')
     
-    if loc_idx == n_locations - 1:  # Only bottom plots get x-label
+    if loc_idx == 1:  # Only bottom plots get x-label
         ax_time.set_xlabel('Time [s]')
     ax_time.set_ylabel('Acceleration [m/s²]')
     ax_time.set_title(f'{location_names[loc_idx]}')
@@ -244,7 +216,7 @@ for loc_idx in range(n_locations):
     ax_zoom.fill_between(t_zoom, zoom_sample_mean - 2*zoom_sample_std, zoom_sample_mean + 2*zoom_sample_std,
                          color='red', alpha=0.1, label='±2σ Uncertainty')
     
-    if loc_idx == n_locations - 1:  # Only bottom plots get x-label
+    if loc_idx == 1:  # Only bottom plots get x-label
         ax_zoom.set_xlabel('Time [s]')
     ax_zoom.set_ylabel('Acceleration [m/s²]')
     ax_zoom.set_title(f'{location_names[loc_idx]}')
@@ -263,7 +235,7 @@ plt.show()
 # ----------- RMSE CALCULATION -----------
 print("-" * 60)
 rmse_results = {}
-for loc_idx in range(n_locations):
+for loc_idx in range(2):
     y_pred = X_sim_mean_denorm[0, loc_idx, :]
     y_true = X_val_raw[0, loc_idx, :]
     y_pred_np = y_pred if isinstance(y_pred, np.ndarray) else y_pred.detach().numpy()
@@ -274,45 +246,4 @@ for loc_idx in range(n_locations):
     
 print("-" * 60)
 
-# ----------- SAVE RESULTS TO TRACKER -----------
-from helpers import save_results_to_tracker
-
-# Collect all experiment parameters and results
-results_dict = {
-    # Model parameters
-    'latent_dim': latent_dim,
-    'sequence_length': sequence_length,
-    'n_locations': n_locations,
-    'condition_dim': condition_dim,
-    
-    # Training parameters
-    'num_epochs': num_epochs,
-    'learning_rate': 1e-3,
-    'weight_recon': weight_recon,
-    'weight_rf': weight_rf,
-    'weight_kl': weight_kl,
-    
-    # Data configuration
-    'training_levels': str(training_level),
-    'validation_level': validation_level[0],
-    'validation_force': C_val_raw[0],
-    'location_i': location_i,
-    'location_j': location_j,
-    
-    # Results
-    **rmse_results,
-    'total_rmse': np.mean(list(rmse_results.values())),
-    
-    # Model info
-    'model_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad),
-    'loss_computation': 'physical_space_with_RF',
-    
-    # Final training loss (if available)
-    'final_total_loss': total_loss.item() if 'total_loss' in locals() else None,
-    'final_recon_loss': recon_loss.item() if 'recon_loss' in locals() else None,
-    'final_rf_loss': rf_loss.item() if 'rf_loss' in locals() else None,
-    'final_kl_loss': kl_loss.item() if 'kl_loss' in locals() else None,
-}
-
-save_results_to_tracker(results_dict)
     

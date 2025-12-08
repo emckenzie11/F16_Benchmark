@@ -1,119 +1,51 @@
 import numpy as np
 import pandas as pd
 from datetime import datetime
-import os
-import openpyxl
 
-def save_results_to_tracker(results_dict, tracker_file='cVAE/results.xlsx'):
+def downsample_signal(signal, factor, axis=-1):
     """
-    Save experiment results to Excel tracker file.
+    Downsample a signal by taking every nth sample along specified axis.
     
     Args:
-        results_dict: Dictionary containing experiment results and parameters
-        tracker_file: Path to Excel tracker file (relative to parent directory)
+        signal: Input signal (numpy array)
+        factor: Downsampling factor (integer)
+        axis: Axis along which to downsample (default: -1, last axis)
+    
+    Returns:
+        Downsampled signal
     """
-    # Determine next test number
-    test_number = 1
-    if os.path.exists(tracker_file):
-        try:
-            existing_df = pd.read_excel(tracker_file, sheet_name=0)
-            if len(existing_df) > 0 and 'test_number' in existing_df.columns:
-                test_number = existing_df['test_number'].max() + 1
-            else:
-                test_number = len(existing_df) + 1
-        except Exception:
-            test_number = 1
+    if factor == 1:
+        return signal
     
-    # Add test number and timestamp as first columns
-    results_dict_with_metadata = {
-        'test_number': test_number,
-        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }
-    results_dict_with_metadata.update(results_dict)
+    # Create slicing tuple to downsample along specified axis
+    slices = [slice(None)] * signal.ndim
+    slices[axis] = slice(None, None, factor)
     
-    # Check if tracker file exists
-    if os.path.exists(tracker_file):
-        try:
-            # Read existing tracker
-            existing_df = pd.read_excel(tracker_file, sheet_name=0)
-
-            # Create new row DataFrame
-            new_row_df = pd.DataFrame([results_dict_with_metadata])
-
-            # Align dtypes and columns to avoid concat dtype-inference issues
-            existing_cols = list(existing_df.columns)
-            new_cols = [col for col in new_row_df.columns if col not in existing_cols]
-
-            # Ensure new_row_df has all existing columns with matching dtypes
-            for col in existing_cols:
-                if col not in new_row_df.columns:
-                    # create a single-row column with same dtype as existing_df[col]
-                    try:
-                        new_row_df[col] = pd.Series([pd.NA], dtype=existing_df[col].dtype)
-                    except Exception:
-                        new_row_df[col] = pd.NA
-                else:
-                    # Try casting to the existing dtype to keep types consistent
-                    try:
-                        new_row_df[col] = new_row_df[col].astype(existing_df[col].dtype)
-                    except Exception:
-                        pass
-
-            # For any new columns present only in new_row_df, add them to existing_df with matching dtype
-            for col in new_cols:
-                try:
-                    existing_df[col] = pd.Series([pd.NA] * len(existing_df), dtype=new_row_df[col].dtype)
-                except Exception:
-                    existing_df[col] = pd.NA
-
-            # Maintain column order
-            column_order = existing_cols + new_cols
-            existing_df = existing_df.reindex(columns=column_order)
-            new_row_df = new_row_df.reindex(columns=column_order)
-
-            # Combine dataframes
-            combined_df = pd.concat([existing_df, new_row_df], ignore_index=True)
-
-        except Exception:
-            combined_df = pd.DataFrame([results_dict_with_metadata])
-    else:
-        combined_df = pd.DataFrame([results_dict_with_metadata])
-    
-    # Save to Excel
-    try:
-        combined_df.to_excel(tracker_file, index=False, engine='openpyxl')
-    except Exception:
-        # Fallback to CSV if Excel fails
-        csv_file = tracker_file.replace('.xlsx', '.csv')
-        combined_df.to_csv(csv_file, index=False)
+    return signal[tuple(slices)]
 
 
-def process_acceleration_data(data_dict, levels, location_i=None, location_j=None,
-                              points_per_period=8192, downsample_factor=2, period_indices=None):
+def process_data(data_dict, levels, location_i=2, location_j=3,
+                 points_per_period=8192, period_indices=None):
     """
-    Extract and process acceleration data from multiple levels and multiple periods.
-
-    This function requires `period_indices` to be provided: each 1-based period index in that
-    list is extracted and treated as an independent sample. The returned array has shape
-    (n_samples, 2, sequence_length) where n_samples = n_levels * len(period_indices)
-    and sequence_length = points_per_period // downsample_factor.
+    Extract acceleration and force data from multiple levels and multiple periods.
 
     Args:
         data_dict: Dictionary mapping level numbers to pandas DataFrames
         levels: List of levels to process (order determines sample order in output)
-        location_i: First DOF location to extract (wing side)
-        location_j: Second DOF location to extract (payload side)
+        location_i: First DOF location to extract (wing side, default 2)
+        location_j: Second DOF location to extract (payload side, default 3)
         points_per_period: Number of samples per period in the raw data (default 8192)
-        downsample_factor: Integer downsampling factor to apply after extraction (default 2)
         period_indices: REQUIRED list of 1-based period indices to extract individually
 
     Returns:
-        np.ndarray: Array of shape (n_samples, 2, sequence_length) containing processed acceleration data
+        tuple: (X_samples, F_samples)
+            - X_samples: Array of shape (n_samples, 2, points_per_period) containing acceleration data
+            - F_samples: Array of shape (n_samples, points_per_period) containing force data
+        where n_samples = n_levels * len(period_indices)
     """
-    if period_indices is None:
-        raise ValueError("period_indices must be provided (list of 1-based period indices)")
 
     X_samples = []
+    F_samples = []
 
     for level in levels:
         # Build list of acceleration arrays in order: [location_i, location_j]
@@ -121,6 +53,9 @@ def process_acceleration_data(data_dict, levels, location_i=None, location_j=Non
             data_dict[level][f'Acceleration{location_i}'].to_numpy(),  # Row 0: Location i (wing side)
             data_dict[level][f'Acceleration{location_j}'].to_numpy(),  # Row 1: Location j (payload side)
         ]
+        
+        # Extract force signal
+        force_array = data_dict[level]['Force'].to_numpy()
 
         accel_matrix = np.vstack(accel_arrays)  # shape (2, total_samples)
 
@@ -129,10 +64,16 @@ def process_acceleration_data(data_dict, levels, location_i=None, location_j=Non
             # p is 1-based
             start_idx = (p - 1) * points_per_period
             end_idx = start_idx + points_per_period
-            block = accel_matrix[:, start_idx:end_idx][:, ::downsample_factor]
-            X_samples.append(block)
+            
+            # Extract acceleration block
+            accel_block = accel_matrix[:, start_idx:end_idx]
+            X_samples.append(accel_block)
+            
+            # Extract force block
+            force_block = force_array[start_idx:end_idx]
+            F_samples.append(force_block)
 
-    return np.array(X_samples)
+    return np.array(X_samples), np.array(F_samples)
 
 
 def normalise_data(data, mean=None, std=None):

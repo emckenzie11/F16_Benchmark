@@ -5,15 +5,18 @@ import torch.nn.functional as F
 
 # ----------- ENCODER ARCHITECTURE -----------
 class Encoder(nn.Module):
-    def __init__(self, input_dim=8192, condition_dim=1, latent_dim=8):
+    def __init__(self, n_locations=2, sequence_length_accel=4096, sequence_length_force=4096, latent_dim=16):
         super().__init__()
+        
+        input_dim = n_locations * sequence_length_accel
         
         # Acceleration branch (smaller MLP)
         self.fc1 = nn.Linear(input_dim, 256)
         self.fc2 = nn.Linear(256, 64)
 
-        # Condition branch
-        self.fc_cond = nn.Linear(condition_dim, 8)
+        # Condition branch (force signal)
+        self.fc_cond1 = nn.Linear(sequence_length_force, 32)
+        self.fc_cond2 = nn.Linear(32, 8)
 
         # Combined layers
         self.fc_combined = nn.Linear(64 + 8, 128)
@@ -28,11 +31,11 @@ class Encoder(nn.Module):
         x = F.relu(self.fc1(x))             # (batch, 256)
         x = F.relu(self.fc2(x))             # (batch, 64)
 
-        # Condition MLP
-        c = F.relu(self.fc_cond(c))         # (batch, 8)
+        # Condition MLP (process force signal)
+        c = F.relu(self.fc_cond1(c))        # (batch, 32)
+        c = F.relu(self.fc_cond2(c))        # (batch, 8)
 
         # Combine
-        # x: (batch, 64), c: (batch, 8) -> concat (batch, 72)
         h = torch.cat([x, c], dim=1)        # (batch, 72)
         h = F.relu(self.fc_combined(h))     # (batch, 128)
 
@@ -45,14 +48,17 @@ class Encoder(nn.Module):
 
 # ----------- DECODER ARCHITECTURE -----------
 class Decoder(nn.Module):
-    def __init__(self, output_dim=8192, n_locations=2, sequence_length=4096, condition_dim=1, latent_dim=8):
+    def __init__(self, n_locations=2, sequence_length_accel=4096, sequence_length_force=4096, latent_dim=8):
         super().__init__()
         # Save shape params for reshape
         self.n_locations = int(n_locations)
-        self.sequence_length = int(sequence_length)
+        self.sequence_length = int(sequence_length_accel)
+        
+        output_dim = n_locations * sequence_length_accel
 
         # Process latent + condition together
-        self.fc_cond = nn.Linear(condition_dim, 8)
+        self.fc_cond1 = nn.Linear(sequence_length_force, 32)
+        self.fc_cond2 = nn.Linear(32, 8)
         self.fc_z = nn.Linear(latent_dim, 64)
         self.fc_combined = nn.Linear(64 + 8, 128)
 
@@ -61,14 +67,14 @@ class Decoder(nn.Module):
         self.fc2 = nn.Linear(256, output_dim)
 
     def forward(self, z, c):
-        # Condition embedding
-        c = F.relu(self.fc_cond(c))         # (batch, 8)
+        # Condition embedding (process force signal)
+        c = F.relu(self.fc_cond1(c))        # (batch, 32)
+        c = F.relu(self.fc_cond2(c))        # (batch, 8)
         
         # Latent embedding
         z = F.relu(self.fc_z(z))            # (batch, 64)
 
         # Combine
-        # z: (batch,64), c: (batch,8) -> concat (batch,72)
         h = torch.cat([z, c], dim=1)        # (batch, 72)
         h = F.relu(self.fc_combined(h))     # (batch, 128)
 
@@ -88,10 +94,12 @@ class Decoder(nn.Module):
 
 # ----------- cVAE ARCHITECTURE -----------
 class cVAE(nn.Module):
-    def __init__(self, latent_dim=8, input_dim=8192, n_locations=2, sequence_length=4096):
+    def __init__(self, latent_dim=8, n_locations=2, sequence_length_accel=4096, sequence_length_force=4096):
         super().__init__()
-        self.encoder = Encoder(input_dim=input_dim, latent_dim=latent_dim)
-        self.decoder = Decoder(output_dim=input_dim, n_locations=n_locations, sequence_length=sequence_length, latent_dim=latent_dim)
+        self.encoder = Encoder(n_locations=n_locations, sequence_length_accel=sequence_length_accel,
+                               sequence_length_force=sequence_length_force, latent_dim=latent_dim)
+        self.decoder = Decoder(n_locations=n_locations, sequence_length_accel=sequence_length_accel, 
+                               sequence_length_force=sequence_length_force, latent_dim=latent_dim)
     
     def reparameterize(self, mu, logvar):
         # Reparameterisation trick: z = μ + σ·ε
@@ -113,34 +121,27 @@ class cVAE(nn.Module):
 
 
 # ----------- LOSS FUNCTION -----------
-def cvae_loss(x_recon, x, RF_recon, RF_true, mu, logvar, weight_recon=1.0, weight_rf=0.5, weight_kl=0.5):
+def cvae_loss(x_recon, x, mu, logvar, beta=0.5):
     """
     cVAE loss with reconstruction, restoring force, and KL divergence terms.
     
     Args:
         x_recon: reconstructed accelerations (batch, n_locations, sequence_length)
         x: true accelerations (batch, n_locations, sequence_length)
-        RF_recon: reconstructed restoring force (batch, sequence_length)
-        RF_true: true restoring force (batch, sequence_length)
         mu: encoder mean (batch, latent_dim)
         logvar: encoder log-variance (batch, latent_dim)
-        weight_recon: weight for reconstruction loss
-        weight_rf: weight for restoring force loss
-        weight_kl: weight for KL divergence loss
+        beta: weight for KL divergence loss
     
     Returns:
-        total_loss, recon_loss, rf_loss, kl_loss
+        total_loss, recon_loss, kl_loss
     """
     # Reconstruction loss (MSE on all accelerations)
     recon_loss = F.mse_loss(x_recon, x, reduction='sum')
-    
-    # Restoring force loss: MSE between reconstructed and true restoring forces
-    rf_loss = F.mse_loss(RF_recon, RF_true, reduction='sum')
     
     # KL divergence loss: KL(q(z|x,c) || p(z))
     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     
     # Total weighted loss
-    total_loss = weight_recon * recon_loss + weight_rf * rf_loss + weight_kl * kl_loss
+    total_loss = recon_loss + beta * kl_loss
     
-    return total_loss, recon_loss, rf_loss, kl_loss
+    return total_loss, recon_loss, kl_loss
