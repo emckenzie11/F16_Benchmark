@@ -1,6 +1,3 @@
-import os
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,6 +32,9 @@ force_map = {1: 12.4, 3: 36.8, 5: 73.6, 7: 97.8}
 
 # Force mapping for validation levels (N)
 force_levels = {2: 24.6, 4: 61.4, 6: 85.7} 
+
+# Effective mass
+m_eff_j = 1.0 
 
 # Data parameters
 fs = 400             
@@ -132,20 +132,17 @@ for epoch in range(num_epochs):
     # Forward pass: model learns in physical space
     X_train_recon, mu_train, logvar_train, z_train = model(X_train, C_train)
     
-    # Reconstruction loss (MSE on accelerations)
-    recon_loss = torch.nn.functional.mse_loss(X_train_recon, X_train, reduction='sum')
+    # Extract restoring forces from location_j (index 1 in 2-location setup)
+    RF_true = -m_eff_j*X_train[:, 1, :]  # (n_samples, sequence_length)
+    RF_recon = -m_eff_j*X_train_recon[:, 1, :]  # (n_samples, sequence_length)
     
-    # Restoring force loss: compute RF from both real and reconstructed accelerations
-    # RF = -m_eff * accel_j (using location_j which is index 1 in our 2-location setup)
-    RF_true = X_train[:, 1, :]  # (n_samples, sequence_length)
-    RF_recon = X_train_recon[:, 1, :]  # (n_samples, sequence_length)
-    rf_loss = torch.nn.functional.mse_loss(RF_recon, RF_true, reduction='sum')
-    
-    # KL divergence loss
-    kl_loss = -0.5 * torch.sum(1 + logvar_train - mu_train.pow(2) - logvar_train.exp())
-    
-    # Total weighted loss
-    total_loss = weight_recon * recon_loss + weight_rf * rf_loss + weight_kl * kl_loss
+    # Compute loss using cvae_loss function with restoring force term
+    total_loss, recon_loss, rf_loss, kl_loss = cvae_loss(
+        X_train_recon, X_train, RF_recon, RF_true, mu_train, logvar_train,
+        weight_recon=weight_recon,
+        weight_rf=weight_rf,
+        weight_kl=weight_kl
+    )
     
     optimizer.zero_grad()
     total_loss.backward()

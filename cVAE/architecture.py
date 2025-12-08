@@ -113,16 +113,34 @@ class cVAE(nn.Module):
 
 
 # ----------- LOSS FUNCTION -----------
-def cvae_loss(x_recon, x, mu, logvar, beta=1.0):
-    """cVAE loss: reconstruction + KL divergence"""
+def cvae_loss(x_recon, x, RF_recon, RF_true, mu, logvar, weight_recon=1.0, weight_rf=0.5, weight_kl=0.5):
+    """
+    cVAE loss with reconstruction, restoring force, and KL divergence terms.
     
-    # Reconstruction loss (MSE)
+    Args:
+        x_recon: reconstructed accelerations (batch, n_locations, sequence_length)
+        x: true accelerations (batch, n_locations, sequence_length)
+        RF_recon: reconstructed restoring force (batch, sequence_length)
+        RF_true: true restoring force (batch, sequence_length)
+        mu: encoder mean (batch, latent_dim)
+        logvar: encoder log-variance (batch, latent_dim)
+        weight_recon: weight for reconstruction loss
+        weight_rf: weight for restoring force loss
+        weight_kl: weight for KL divergence loss
+    
+    Returns:
+        total_loss, recon_loss, rf_loss, kl_loss
+    """
+    # Reconstruction loss (MSE on all accelerations)
     recon_loss = F.mse_loss(x_recon, x, reduction='sum')
+    
+    # Restoring force loss: MSE between reconstructed and true restoring forces
+    rf_loss = F.mse_loss(RF_recon, RF_true, reduction='sum')
     
     # KL divergence loss: KL(q(z|x,c) || p(z))
     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     
-    # Total loss
-    total_loss = recon_loss + beta * kl_loss
+    # Total weighted loss
+    total_loss = weight_recon * recon_loss + weight_rf * rf_loss + weight_kl * kl_loss
     
-    return total_loss, recon_loss, kl_loss
+    return total_loss, recon_loss, rf_loss, kl_loss
