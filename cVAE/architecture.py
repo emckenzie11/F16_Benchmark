@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 # ----------- ENCODER ARCHITECTURE -----------
 class Encoder(nn.Module):
-    def __init__(self, n_locations=2, sequence_length_accel=4096, sequence_length_force=4096, latent_dim=16):
+    def __init__(self, n_locations=2, sequence_length_accel=256, sequence_length_force=256, latent_dim = 32):
         super().__init__()
         
         input_dim = n_locations * sequence_length_accel
@@ -15,13 +15,13 @@ class Encoder(nn.Module):
         self.fc2 = nn.Linear(256, 64)
 
         # Condition branch (force signal)
-        self.fc_cond1 = nn.Linear(sequence_length_force, 32)
-        self.fc_cond2 = nn.Linear(32, 8)
+        self.fc_cond1 = nn.Linear(sequence_length_force, 128)
+        self.fc_cond2 = nn.Linear(128, 64)
 
         # Combined layers
-        self.fc_combined = nn.Linear(64 + 8, 128)
-        self.fc_mu = nn.Linear(128, latent_dim)
-        self.fc_logvar = nn.Linear(128, latent_dim)
+        self.fc_combined = nn.Linear(64 + 64, 64)
+        self.fc_mu = nn.Linear(64, latent_dim)
+        self.fc_logvar = nn.Linear(64, latent_dim)
 
     def forward(self, x, c):
         # Flatten acceleration
@@ -32,12 +32,12 @@ class Encoder(nn.Module):
         x = F.relu(self.fc2(x))             # (batch, 64)
 
         # Condition MLP (process force signal)
-        c = F.relu(self.fc_cond1(c))        # (batch, 32)
-        c = F.relu(self.fc_cond2(c))        # (batch, 8)
+        c = F.relu(self.fc_cond1(c))        # (batch, 128)
+        c = F.relu(self.fc_cond2(c))        # (batch, 64)
 
         # Combine
-        h = torch.cat([x, c], dim=1)        # (batch, 72)
-        h = F.relu(self.fc_combined(h))     # (batch, 128)
+        h = torch.cat([x, c], dim=1)        # (batch, 128)
+        h = F.relu(self.fc_combined(h))     # (batch, 64)
 
         # Latent mean and variance
         mu = self.fc_mu(h)                  # (batch, latent_dim)
@@ -48,7 +48,7 @@ class Encoder(nn.Module):
 
 # ----------- DECODER ARCHITECTURE -----------
 class Decoder(nn.Module):
-    def __init__(self, n_locations=2, sequence_length_accel=4096, sequence_length_force=4096, latent_dim=8):
+    def __init__(self, n_locations=2, sequence_length_accel=256, sequence_length_force=256, latent_dim = 32):
         super().__init__()
         # Save shape params for reshape
         self.n_locations = int(n_locations)
@@ -57,44 +57,37 @@ class Decoder(nn.Module):
         output_dim = n_locations * sequence_length_accel
 
         # Process latent + condition together
-        self.fc_cond1 = nn.Linear(sequence_length_force, 32)
-        self.fc_cond2 = nn.Linear(32, 8)
+        self.fc_cond1 = nn.Linear(sequence_length_force, 128)
+        self.fc_cond2 = nn.Linear(128, 64)
+        
         self.fc_z = nn.Linear(latent_dim, 64)
-        self.fc_combined = nn.Linear(64 + 8, 128)
-
+        self.fc_combined = nn.Linear(64 + 64, 256)
+        
         # MLP to expand to output size (mirror of encoder)
-        self.fc1 = nn.Linear(128, 256)
-        self.fc2 = nn.Linear(256, output_dim)
+        self.fc1 = nn.Linear(256, output_dim)
 
     def forward(self, z, c):
         # Condition embedding (process force signal)
-        c = F.relu(self.fc_cond1(c))        # (batch, 32)
-        c = F.relu(self.fc_cond2(c))        # (batch, 8)
+        c = F.relu(self.fc_cond1(c))        # (batch, 128)
+        c = F.relu(self.fc_cond2(c))        # (batch, 64)
         
         # Latent embedding
         z = F.relu(self.fc_z(z))            # (batch, 64)
 
         # Combine
-        h = torch.cat([z, c], dim=1)        # (batch, 72)
-        h = F.relu(self.fc_combined(h))     # (batch, 128)
+        h = torch.cat([z, c], dim=1)        # (batch, 128)
+        h = F.relu(self.fc_combined(h))     # (batch, 256)
 
         # MLP expansion
-        h = F.relu(self.fc1(h))             # (batch, 256)
-        x_hat = self.fc2(h)                 # (batch, output_dim)
+        x_hat = self.fc1(h)                 # (batch, output_dim)
 
         # Reshape back to (batch, n_locations, sequence_length)
-        batch_size = z.size(0)
-        expected = self.n_locations * self.sequence_length
-        if x_hat.numel() != batch_size * expected:
-            raise RuntimeError(f"Decoder produced {x_hat.numel()} elements but expected {batch_size * expected} "
-                               f"(batch={batch_size}, n_locations={self.n_locations}, sequence_length={self.sequence_length})")
-
-        return x_hat.view(batch_size, self.n_locations, self.sequence_length)
+        return x_hat.view(z.size(0), self.n_locations, self.sequence_length)
 
 
 # ----------- cVAE ARCHITECTURE -----------
 class cVAE(nn.Module):
-    def __init__(self, latent_dim=8, n_locations=2, sequence_length_accel=4096, sequence_length_force=4096):
+    def __init__(self, n_locations=2, sequence_length_accel=256, sequence_length_force=256, latent_dim = 32):
         super().__init__()
         self.encoder = Encoder(n_locations=n_locations, sequence_length_accel=sequence_length_accel,
                                sequence_length_force=sequence_length_force, latent_dim=latent_dim)

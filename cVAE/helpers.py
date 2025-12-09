@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
-from datetime import datetime
+import scipy.signal
+import scipy.stats
 
 def downsample_signal(signal, factor, axis=-1):
     """
@@ -103,3 +104,29 @@ def normalise_data(data, mean=None, std=None):
     normalised = (data - mean) / std
     
     return normalised, mean, std
+
+def slice_period_data(X_period, F_period, slice_length=256, step=128):
+    """
+    Slice a single period of acceleration and force into overlapping windows.
+
+    Args:
+        X_period: (2, T) array for one period
+        F_period: (T,) force array for same period
+        slice_length: length of each slice
+        step: stride between slices
+
+    Returns:
+        X_slices: (n_slices, 2, slice_length)
+        F_slices: (n_slices, slice_length)
+    """
+    X_slices = []
+    F_slices = []
+
+    T = X_period.shape[1]
+
+    for start in range(0, T - slice_length + 1, step):
+        end = start + slice_length
+        X_slices.append(X_period[:, start:end])
+        F_slices.append(F_period[start:end])
+
+    return np.array(X_slices), np.array(F_slices)
