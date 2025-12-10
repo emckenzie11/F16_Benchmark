@@ -10,7 +10,7 @@ from helpers import process_data, normalise_data, downsample_signal, slice_perio
 
 # ----------- USER CONFIGURATION -----------
 # Validation level
-validation_level = [6]  # Level to use for validation (Options: 2, 4, 6)
+validation_level = [2, 4, 6]  # Level to use for validation (Options: 2, 4, 6)
 
 # User-configurable data-shape parameters
 training_period_indices = list(range(3, 10))  # periods 3 through 9 inclusive 
@@ -94,7 +94,9 @@ F_norm, F_mean, F_std = normalise_data(F_sliced)
 X_train = torch.tensor(X_norm, dtype=torch.float32)
 F_train = torch.tensor(F_norm, dtype=torch.float32)
 
-print("-" * 60)
+print("=" * 60)
+print("TRAINING")
+print("=" * 60)
 print("Training Data Shape (Acceleration):", X_train.shape)
 print("Conditioning Data Shape (Force):", F_train.shape)
 
@@ -123,218 +125,228 @@ for epoch in range(num_epochs):
     if (epoch + 1) % 200 == 0:
         print(f"Epoch {epoch+1}: Loss={total_loss.item():.3f} Recon={recon_loss.item():.3f} KL={kl_loss.item():.3f}")
 
-# ----------- PROCESS VALIDATION DATA (UNSLICED) -----------
-# Extract per-period samples for validation
-X_val_raw, F_val_raw = process_data(validation_data, validation_level,
-                                     period_indices=training_period_indices)
+# ----------- LOOP THROUGH VALIDATION LEVELS -----------
+print("=" * 60)
+print("SIMULATION")
+print("=" * 60)
+# Initialize storage for all validation levels
+all_val_data = {}
 
-X_val_raw = downsample_signal(X_val_raw, downsample_factor_accel, axis=-1)
-F_val_raw = downsample_signal(F_val_raw, downsample_factor_force, axis=-1)
+for val_level in validation_level:
+    # ----------- PROCESS VALIDATION DATA (UNSLICED) -----------
+    # Extract per-period samples for this validation level
+    X_val_raw, F_val_raw = process_data({val_level: validation_data[val_level]}, [val_level],
+                                         period_indices=training_period_indices)
 
-#----------- SLICE VALIDATION DATA -----------
-period_index = 5  # 0-based index for 6th period
+    X_val_raw = downsample_signal(X_val_raw, downsample_factor_accel, axis=-1)
+    F_val_raw = downsample_signal(F_val_raw, downsample_factor_force, axis=-1)
 
-X_slices_val, F_slices_val = slice_period_data(
-       X_val_raw[period_index],
-       F_val_raw[period_index],
-       slice_length=256,
-       step=128
-)
+    #----------- SLICE VALIDATION DATA -----------
+    period_index = 5  # 0-based index for 6th period
 
-# Normalise validation force data
-F_slices_val_norm = (F_slices_val - F_mean) / F_std
+    X_slices_val, F_slices_val = slice_period_data(
+           X_val_raw[period_index],
+           F_val_raw[period_index],
+           slice_length=256,
+           step=128
+    )
 
-# Convert to tensor
-F_slices_val_norm = torch.tensor(F_slices_val_norm, dtype=torch.float32)
+    # Normalise validation force data
+    F_slices_val_norm = (F_slices_val - F_mean) / F_std
 
-# --------------- SIMULATE THE MODEL USING DECODER ONLY -----------
-model.eval()
-with torch.no_grad():
-    # Generate multiple stochastic reconstructions using decoder only
-    n_samples = 50
-    n_slices = F_slices_val_norm.shape[0]
-    
-    # Store samples: (n_slices, n_samples, 2, slice_length)
-    X_sim_all_sliced = []
-    
-    # Outer loop: iterate over each slice
-    for i in range(n_slices):
-        c_slice = F_slices_val_norm[i:i+1]   # selects singular slice
+    # Convert to tensor
+    F_slices_val_norm = torch.tensor(F_slices_val_norm, dtype=torch.float32)
+
+    # --------------- SIMULATE THE MODEL USING DECODER ONLY -----------
+    print("Simulating Level:", val_level)
+    print("-" * 60)
+    model.eval()
+    with torch.no_grad():
+        # Generate multiple stochastic reconstructions using decoder only
+        n_samples = 50
+        n_slices = F_slices_val_norm.shape[0]
         
-        # Inner loop: iterate over each sample
-        X_sim_samples_for_slice = []
-        for _ in range(n_samples):
-            z = torch.randn(1, latent_dim) # reparameterisation trick
-            X_sim_slice = model.decoder(z, c_slice)[0]   # pass through decoder only
-            X_sim_samples_for_slice.append(X_sim_slice.cpu().numpy())  # append sample
+        # Store samples: (n_slices, n_samples, 2, slice_length)
+        X_sim_all_sliced = []
         
-        # Stack samples for this slice
-        X_sim_samples_for_slice = np.array(X_sim_samples_for_slice)
-        X_sim_all_sliced.append(X_sim_samples_for_slice)
+        # Outer loop: iterate over each slice
+        for i in range(n_slices):
+            c_slice = F_slices_val_norm[i:i+1]   # selects singular slice
+            
+            # Inner loop: iterate over each sample
+            X_sim_samples_for_slice = []
+            for _ in range(n_samples):
+                z = torch.randn(1, latent_dim) # reparameterisation trick
+                X_sim_slice = model.decoder(z, c_slice)[0]   # pass through decoder only
+                X_sim_samples_for_slice.append(X_sim_slice.cpu().numpy())  # append sample
+            
+            # Stack samples for this slice
+            X_sim_samples_for_slice = np.array(X_sim_samples_for_slice)
+            X_sim_all_sliced.append(X_sim_samples_for_slice)
+        
+        # Stack all slices
+        X_sim_all_sliced = np.array(X_sim_all_sliced)
+
+    # --------------- STITCH SLICES BACK TOGETHER -----------
+    T = X_val_raw.shape[2]                # e.g., 4096
+    n_slices = X_sim_all_sliced.shape[0]  # number of slices in this period
+    n_samples = X_sim_all_sliced.shape[1] # Monte Carlo samples per slice
+
+    # This will hold final generated full signals:
+    X_sim_samples_for_period = []
+
+    # Reconstruct FULL PERIOD for each Monte Carlo sample
+    for sample_idx in range(n_samples):
+
+        # Empty reconstruction buffers
+        X_recon = np.zeros((2, T))
+        counts  = np.zeros(T)
+
+        # Loop through each slice
+        for slice_idx in range(n_slices):
+
+            # Predicted slice for this sample: shape (2, slice_length)
+            sl = X_sim_all_sliced[slice_idx, sample_idx]
+
+            # Compute placement in the final signal
+            start = slice_idx * step
+            end   = start + slice_length
+
+            # Accumulate values
+            X_recon[:, start:end] += sl
+            counts[start:end]     += 1
+
+        # Avoid division by zero (normally unnecessary)
+        counts[counts == 0] = 1
+
+        # Average overlapping regions
+        X_recon /= counts
+
+        # Save this sample
+        X_sim_samples_for_period.append(X_recon)
+
+    # Convert to array → shape (n_samples, 2, T)
+    X_sim_all = np.array(X_sim_samples_for_period)
+
+    # Compute mean across Monte-Carlo samples
+    X_sim_mean = X_sim_all.mean(axis=0)  # shape (2, T)
+
+    # --------------- DENORMALISE FOR ANALYSIS -----------
+    # Denormalise the mean simulation back to original scale
+    X_sim_mean_denorm = X_sim_mean * X_std + X_mean
+
+    # Denormalise all simulation samples for uncertainty analysis
+    X_sim_samples_denorm = X_sim_all * X_std + X_mean
     
-    # Stack all slices
-    X_sim_all_sliced = np.array(X_sim_all_sliced)
+    # Store results for this validation level
+    all_val_data[val_level] = {
+        'X_val_raw': X_val_raw,
+        'X_sim_mean_denorm': X_sim_mean_denorm,
+        'X_sim_samples_denorm': X_sim_samples_denorm,
+        'period_index': period_index
+    }
 
-print("-" * 60)
-print("Simulation Output Shape:")
-print("X_sim_all_sliced:", X_sim_all_sliced.shape) 
-
-# --------------- STITCH SLICES BACK TOGETHER -----------
-T = X_val_raw.shape[2]                # e.g., 4096
-n_slices = X_sim_all_sliced.shape[0]  # number of slices in this period
-n_samples = X_sim_all_sliced.shape[1] # Monte Carlo samples per slice
-
-# This will hold final generated full signals:
-X_sim_samples_for_period = []
-
-# Reconstruct FULL PERIOD for each Monte Carlo samplE
-for sample_idx in range(n_samples):
-
-    # Empty reconstruction buffers
-    X_recon = np.zeros((2, T))
-    counts  = np.zeros(T)
-
-    # Loop through each slice
-    for slice_idx in range(n_slices):
-
-        # Predicted slice for this sample: shape (2, slice_length)
-        sl = X_sim_all_sliced[slice_idx, sample_idx]
-
-        # Compute placement in the final signal
-        start = slice_idx * step
-        end   = start + slice_length
-
-        # Accumulate values
-        X_recon[:, start:end] += sl
-        counts[start:end]     += 1
-
-    # Avoid division by zero (normally unnecessary)
-    counts[counts == 0] = 1
-
-    # Average overlapping regions
-    X_recon /= counts
-
-    # Save this sample
-    X_sim_samples_for_period.append(X_recon)
-
-# Convert to array → shape (n_samples, 2, T)
-X_sim_all = np.array(X_sim_samples_for_period)
-
-# Compute mean across Monte-Carlo samples
-X_sim_mean = X_sim_all.mean(axis=0)  # shape (2, T)
-
-print("-" * 60)
-print("Final reconstructed shapes:")
-print("X_sim_all:", X_sim_all.shape)
-print("X_sim_mean:", X_sim_mean.shape)
-
-# --------------- DENORMALISE FOR ANALYSIS -----------
-# Denormalise the mean simulation back to original scale
-X_sim_mean_denorm = X_sim_mean * X_std + X_mean
-
-# Denormalise all simulation samples for uncertainty analysis
-X_sim_samples_denorm = X_sim_all * X_std + X_mean
-    
-# ----------- PLOTTING -----------
+# ----------- PLOTTING ALL VALIDATION LEVELS ON ONE FIGURE -----------
+print("Plotting All Validation Levels")
 # Downsampled sampling frequency used for plotting 
 fs_downsampled = fs / downsample_factor_accel
-T_full = X_val_raw.shape[2]
-t = np.arange(T_full) / fs_downsampled
 
-# Setup figure with subplots (2 locations x 2 columns)
-fig, axes = plt.subplots(2, 2, figsize=(20, 10))
-fig.suptitle(f'cVAE Reconstruction: Simulated vs Validation Data\nLevel {validation_level[0]}', fontsize=16, fontweight='bold')
+# Zoom settings
+zoom_window_seconds = 1.0  # seconds of data to display
 
 # Location names for plotting
 location_names = [f'Location {location_i} (Wing Side)', f'Location {location_j} (Payload Side)']
 
-# Plot both locations
-for loc_idx in range(2):
-    # Full time domain plot with variance
-    ax_full = axes[loc_idx, 0]
-    
-    # Plot validation (true) data for this period
-    ax_full.plot(t, X_val_raw[period_index, loc_idx, :], 
-                 color='black', linewidth=1.5, label='Validation (True)', alpha=0.8)
-    
-    # Plot mean simulation for this period
-    ax_full.plot(t, X_sim_mean_denorm[loc_idx, :], 
-                 color='red', linewidth=1.5, label='cVAE Mean', linestyle='--', alpha=0.9)
-    
-    # Plot variance as confidence bands (std across samples for this period)
-    sim_sample_std = X_sim_samples_denorm[:, loc_idx, :].std(axis=0)
-    
-    ax_full.fill_between(t, X_sim_mean_denorm[loc_idx, :] - sim_sample_std, 
-                    X_sim_mean_denorm[loc_idx, :] + sim_sample_std,
-                    color='blue', alpha=0.2, label='±1σ Uncertainty')
-    ax_full.fill_between(t, X_sim_mean_denorm[loc_idx, :] - 2*sim_sample_std, 
-                    X_sim_mean_denorm[loc_idx, :] + 2*sim_sample_std,
-                    color='blue', alpha=0.1, label='±2σ Uncertainty')
-    
-    if loc_idx == 1:  # Only bottom plots get x-label
-        ax_full.set_xlabel('Time [s]')
-    ax_full.set_ylabel('Acceleration [m/s²]')
-    ax_full.set_title(f'{location_names[loc_idx]}')
-    ax_full.grid(True, alpha=0.3)
-    ax_full.legend(loc='upper right')
-    
-    # Zoomed time domain plot (centered at midpoint ±0.5 second)
-    ax_zoom = axes[loc_idx, 1]
+# Create single figure with 3 rows (one per validation level) x 2 columns (one per location)
+fig, axes = plt.subplots(3, 2, figsize=(15, 10))
+fig.suptitle('cVAE Reconstruction: Simulated vs Validation Data', fontsize=18, fontweight='bold')
 
-    # Compute window of ±0.5 second around the midpoint
-    half_window = int(0.5 * fs_downsampled)  # samples per 0.5 second at downsampled rate
+# Plot each validation level
+for row_idx, val_level in enumerate(validation_level):
+    data = all_val_data[val_level]
+    X_val_raw = data['X_val_raw']
+    X_sim_mean_denorm = data['X_sim_mean_denorm']
+    X_sim_samples_denorm = data['X_sim_samples_denorm']
+    period_index = data['period_index']
+    
+    T_full = X_val_raw.shape[2]
+    t = np.arange(T_full) / fs_downsampled
+    
+    # Compute zoom window (centered at midpoint)
+    half_window_samples = int((zoom_window_seconds / 2) * fs_downsampled)
     mid_idx = len(t) // 2
-    start_idx = max(mid_idx - half_window, 0)
-    end_idx = min(mid_idx + half_window, len(t))
-
+    start_idx = max(mid_idx - half_window_samples, 0)
+    end_idx = min(mid_idx + half_window_samples, len(t))
+    
     t_zoom = t[start_idx:end_idx]
-    
-    # Plot zoomed validation (true) data
-    ax_zoom.plot(t_zoom, X_val_raw[period_index, loc_idx, start_idx:end_idx], 
-                 color='black', linewidth=1.5, label='Validation (True)', alpha=0.8)
-    
-    # Plot zoomed mean simulation
-    ax_zoom.plot(t_zoom, X_sim_mean_denorm[loc_idx, start_idx:end_idx], 
-                 color='red', linewidth=1.5, label='cVAE Mean', linestyle='--', alpha=0.9)
-    
-    # Plot zoomed uncertainty bands
-    zoom_sample_std = sim_sample_std[start_idx:end_idx]
-    
-    ax_zoom.fill_between(t_zoom, X_sim_mean_denorm[loc_idx, start_idx:end_idx] - zoom_sample_std,
-                         X_sim_mean_denorm[loc_idx, start_idx:end_idx] + zoom_sample_std,
-                         color='blue', alpha=0.2, label='±1σ Uncertainty')
-    ax_zoom.fill_between(t_zoom, X_sim_mean_denorm[loc_idx, start_idx:end_idx] - 2*zoom_sample_std,
-                         X_sim_mean_denorm[loc_idx, start_idx:end_idx] + 2*zoom_sample_std,
-                         color='blue', alpha=0.1, label='±2σ Uncertainty')
-    
-    if loc_idx == 1:  # Only bottom plots get x-label
-        ax_zoom.set_xlabel('Time [s]')
-    ax_zoom.set_ylabel('Acceleration [m/s²]')
-    ax_zoom.set_title(f'{location_names[loc_idx]} (Zoomed)')
-    ax_zoom.grid(True, alpha=0.3)
-    ax_zoom.legend(loc='upper right')
 
-# Set consistent number formatting for all plots
-for ax in axes.flat:
-    ax.ticklabel_format(style='plain', useOffset=False)
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}'))
+    # Plot both locations for this level
+    for loc_idx in range(2):
+        ax = axes[row_idx, loc_idx]
+        
+        # Plot validation (true) data for this period (zoomed)
+        ax.plot(t_zoom, X_val_raw[period_index, loc_idx, start_idx:end_idx], 
+                color='black', linewidth=1.5, label='Validation (True)', alpha=0.8)
+        
+        # Plot mean simulation for this period (zoomed)
+        ax.plot(t_zoom, X_sim_mean_denorm[loc_idx, start_idx:end_idx], 
+                color='red', linewidth=1.5, label='cVAE Mean', linestyle='--', alpha=0.9)
+        
+        # Plot variance as confidence bands (std across samples for this period)
+        sim_sample_std = X_sim_samples_denorm[:, loc_idx, start_idx:end_idx].std(axis=0)
+        
+        ax.fill_between(t_zoom, X_sim_mean_denorm[loc_idx, start_idx:end_idx] - sim_sample_std, 
+                        X_sim_mean_denorm[loc_idx, start_idx:end_idx] + sim_sample_std,
+                        color='blue', alpha=0.2, label='±1σ Uncertainty')
+        ax.fill_between(t_zoom, X_sim_mean_denorm[loc_idx, start_idx:end_idx] - 2*sim_sample_std, 
+                        X_sim_mean_denorm[loc_idx, start_idx:end_idx] + 2*sim_sample_std,
+                        color='blue', alpha=0.1, label='±2σ Uncertainty')
+        
+        # Labels and formatting
+        if row_idx == 2:  # Only bottom row gets x-label
+            ax.set_xlabel('Time [s]')
+        ax.set_ylabel('Acceleration [m/s²]')
+        
+        # Title: location name for top row, level number on left column
+        if row_idx == 0:
+            ax.set_title(f'{location_names[loc_idx]}', fontsize=14)
+        if loc_idx == 0:
+            ax.text(-0.15, 0.5, f'Level {val_level}', transform=ax.transAxes,
+                   fontsize=14, fontweight='bold', va='center', rotation=90)
+        
+        ax.grid(True, alpha=0.3)
+        if row_idx == 0 and loc_idx == 1:  # Legend only on top-right
+            ax.legend(loc='upper right')
+        
+        ax.ticklabel_format(style='plain', useOffset=False)
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}'))
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}'))
 
 plt.tight_layout()
 plt.show()
 
-# ----------- RMSE CALCULATION -----------
-print("-" * 60)
-rmse_results = {}
-for loc_idx in range(2):
-    y_pred = X_sim_mean_denorm[loc_idx, :]
-    y_true = X_val_raw[period_index, loc_idx, :]
-    y_pred_np = y_pred if isinstance(y_pred, np.ndarray) else y_pred.detach().numpy()
-    y_true_np = y_true if isinstance(y_true, np.ndarray) else y_true.detach().numpy()
-    rmse = np.sqrt(np.mean((y_pred_np - y_true_np)**2))
-    rmse_results[f'rmse_location_{loc_idx+1}'] = rmse
-    print(f"{location_names[loc_idx]} RMSE: {rmse:.6f}")
+# ----------- RMSE CALCULATION FOR ALL LEVELS -----------
+print("=" * 60)
+print("RMSE")
+print("=" * 60)
+
+for val_level in validation_level:
+    data = all_val_data[val_level]
+    X_val_raw = data['X_val_raw']
+    X_sim_mean_denorm = data['X_sim_mean_denorm']
+    period_index = data['period_index']
     
-print("-" * 60)
+    print(f"Level {val_level}:")
+    rmse_results = {}
+    for loc_idx in range(2):
+        y_pred = X_sim_mean_denorm[loc_idx, :]
+        y_true = X_val_raw[period_index, loc_idx, :]
+        y_pred_np = y_pred if isinstance(y_pred, np.ndarray) else y_pred.detach().numpy()
+        y_true_np = y_true if isinstance(y_true, np.ndarray) else y_true.detach().numpy()
+        rmse = np.sqrt(np.mean((y_pred_np - y_true_np)**2))
+        rmse_results[f'rmse_location_{loc_idx+1}'] = rmse
+        print(f"{location_names[loc_idx]} RMSE: {rmse:.6f}")
+    print("-" * 60)
+        
 
 
