@@ -5,6 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from torch.utils.data import TensorDataset, DataLoader
 from architecture import cVAE, cvae_loss
 from helpers import process_data, normalise_data, downsample_signal, slice_period_data
 
@@ -18,8 +19,9 @@ downsample_factor_accel = 2   # Downsampling for acceleration signals
 downsample_factor_force = 2   # Downsampling for force signal 
 
 # Training parameters
-num_epochs = 1200
-beta = 0.5  # Weight for KL divergence in cVAE loss
+num_epochs = 150
+beta = 0.5  
+minibatch_size = 32
 
 # ----------- PARAMETERS -----------
 # Data levels and locations
@@ -94,6 +96,12 @@ F_norm, F_mean, F_std = normalise_data(F_sliced)
 X_train = torch.tensor(X_norm, dtype=torch.float32)
 F_train = torch.tensor(F_norm, dtype=torch.float32)
 
+# Create dataset
+train_dataset = TensorDataset(X_train, F_train)
+
+# Create dataloader
+train_loader = DataLoader(train_dataset, batch_size=minibatch_size, shuffle=True)
+
 print("=" * 60)
 print("TRAINING")
 print("=" * 60)
@@ -111,19 +119,32 @@ print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requir
 # ----------- TRAINING -----------
 for epoch in range(num_epochs):
     model.train()
-    
-    # Forward pass: model learns in physical space with force signal conditioning
-    X_train_recon, mu_train, logvar_train, z_train = model(X_train, F_train)
-    
-    # Compute cVAE loss in physical space
-    total_loss, recon_loss, kl_loss = cvae_loss(X_train_recon, X_train, mu_train, logvar_train, beta=beta)
-    
-    optimizer.zero_grad()
-    total_loss.backward()
-    optimizer.step()
-    
-    if (epoch + 1) % 200 == 0:
-        print(f"Epoch {epoch+1}: Loss={total_loss.item():.3f} Recon={recon_loss.item():.3f} KL={kl_loss.item():.3f}")
+    epoch_loss = 0.0
+    epoch_recon = 0.0
+    epoch_kl = 0.0
+
+    for X_batch, F_batch in train_loader:
+        # Forward pass
+        X_recon, mu, logvar, z = model(X_batch, F_batch)
+
+        # Loss for this minibatch
+        loss, recon_loss, kl_loss = cvae_loss(X_recon, X_batch, mu, logvar, beta=beta)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # Accumulate epoch stats
+        epoch_loss += loss.item()
+        epoch_recon += recon_loss.item()
+        epoch_kl += kl_loss.item()
+
+    # Print every 10 epochs
+    if (epoch + 1) % 10 == 0:
+        print(f"Epoch {epoch+1}: "
+              f"Loss={epoch_loss:.3f}  "
+              f"Recon={epoch_recon:.3f}  "
+              f"KL={epoch_kl:.3f}")
 
 # ----------- LOOP THROUGH VALIDATION LEVELS -----------
 print("=" * 60)
