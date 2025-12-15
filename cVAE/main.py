@@ -19,7 +19,7 @@ downsample_factor_accel = 2   # Downsampling for acceleration signals
 downsample_factor_force = 2   # Downsampling for force signal 
 
 # Training parameters
-num_epochs = 150
+num_epochs = 100
 beta = 0.5  
 minibatch_size = 32
 
@@ -139,12 +139,13 @@ for epoch in range(num_epochs):
         epoch_recon += recon_loss.item()
         epoch_kl += kl_loss.item()
 
-    # Print every 10 epochs
+    # Store every 10 epochs
     if (epoch + 1) % 10 == 0:
         print(f"Epoch {epoch+1}: "
               f"Loss={epoch_loss:.3f}  "
               f"Recon={epoch_recon:.3f}  "
               f"KL={epoch_kl:.3f}")
+
 
 # ----------- LOOP THROUGH VALIDATION LEVELS -----------
 print("=" * 60)
