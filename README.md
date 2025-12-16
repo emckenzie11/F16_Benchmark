@@ -9,4 +9,6 @@ See https://www.nonlinearbenchmark.org/benchmarks/f-16-gvt for the training data
 
 See 'F16Benchmark.pdf' for further details on the training data and the aim of this analysis.
 
+# cVAE
 
+The code within 'main' can be ran to simulate the test datasets 2, 4 & 6. The cVAE is trained on data sets 1, 3, 5 & 7. The architecture includes two convolution layers followed by some MLP layers in order to compress the data to a latent space of dimension 32. Minibatching and slcicing is also used. 

@@ -41,16 +41,16 @@ latent_dim = 32
 
 # ----------- LOAD DATA -----------
 training_data = {
-    1: pd.read_csv('BenchmarkData/F16Data_FullMSine_Level1.csv'), # 12.4N
-    3: pd.read_csv('BenchmarkData/F16Data_FullMSine_Level3.csv'), # 36.8N
-    5: pd.read_csv('BenchmarkData/F16Data_FullMSine_Level5.csv'), # 73.6N
-    7: pd.read_csv('BenchmarkData/F16Data_FullMSine_Level7.csv')  # 97.8N
+    1: pd.read_csv('data/F16Data_FullMSine_Level1.csv'), # 12.4N
+    3: pd.read_csv('data/F16Data_FullMSine_Level3.csv'), # 36.8N
+    5: pd.read_csv('data/F16Data_FullMSine_Level5.csv'), # 73.6N
+    7: pd.read_csv('data/F16Data_FullMSine_Level7.csv')  # 97.8N
 }
 
 validation_data = {
-    2: pd.read_csv('BenchmarkData/F16Data_FullMSine_Level2_Validation.csv'), # 24.6N
-    4: pd.read_csv('BenchmarkData/F16Data_FullMSine_Level4_Validation.csv'), # 61.4N
-    6: pd.read_csv('BenchmarkData/F16Data_FullMSine_Level6_Validation.csv'), # 85.7N
+    2: pd.read_csv('data/F16Data_FullMSine_Level2_Validation.csv'), # 24.6N
+    4: pd.read_csv('data/F16Data_FullMSine_Level4_Validation.csv'), # 61.4N
+    6: pd.read_csv('data/F16Data_FullMSine_Level6_Validation.csv'), # 85.7N
 }
 
 # Keep only requested levels
@@ -268,6 +268,35 @@ for val_level in validation_level:
         'period_index': period_index
     }
 
+# ----------- RMSE CALCULATION FOR ALL LEVELS -----------
+print("=" * 60)
+print("RMSE")
+print("=" * 60)
+
+# Location names for plotting
+location_names = [f'Location {location_i} (Wing Side)', f'Location {location_j} (Payload Side)']
+
+for val_level in validation_level:
+    data = all_val_data[val_level]
+    X_val_raw = data['X_val_raw']
+    X_sim_mean_denorm = data['X_sim_mean_denorm']
+    period_index = data['period_index']
+    
+    print(f"Level {val_level}:")
+    rmse_results = {}
+    for loc_idx in range(2):
+        y_pred = X_sim_mean_denorm[loc_idx, :]
+        y_true = X_val_raw[period_index, loc_idx, :]
+        y_pred_np = y_pred if isinstance(y_pred, np.ndarray) else y_pred.detach().numpy()
+        y_true_np = y_true if isinstance(y_true, np.ndarray) else y_true.detach().numpy()
+        rmse = np.sqrt(np.mean((y_pred_np - y_true_np)**2))
+        rmse_results[f'rmse_location_{loc_idx+1}'] = rmse
+        print(f"{location_names[loc_idx]} RMSE: {rmse:.6f}")
+    print("-" * 60)
+    
+    # Store RMSE results in all_val_data for plotting
+    all_val_data[val_level]['rmse_results'] = rmse_results
+    
 # ----------- PLOTTING ALL VALIDATION LEVELS ON ONE FIGURE -----------
 print("Plotting All Validation Levels")
 # Downsampled sampling frequency used for plotting 
@@ -275,9 +304,6 @@ fs_downsampled = fs / downsample_factor_accel
 
 # Zoom settings
 zoom_window_seconds = 1.0  # seconds of data to display
-
-# Location names for plotting
-location_names = [f'Location {location_i} (Wing Side)', f'Location {location_j} (Payload Side)']
 
 # Create single figure with 3 rows (one per validation level) x 2 columns (one per location)
 fig, axes = plt.subplots(3, 2, figsize=(15, 10))
@@ -302,6 +328,9 @@ for row_idx, val_level in enumerate(validation_level):
     
     t_zoom = t[start_idx:end_idx]
 
+    # Get RMSE results for this level
+    rmse_results = data['rmse_results']
+    
     # Plot both locations for this level
     for loc_idx in range(2):
         ax = axes[row_idx, loc_idx]
@@ -324,6 +353,12 @@ for row_idx, val_level in enumerate(validation_level):
                         X_sim_mean_denorm[loc_idx, start_idx:end_idx] + 2*sim_sample_std,
                         color='blue', alpha=0.1, label='±2σ Uncertainty')
         
+        # Add RMSE text to plot
+        rmse_value = rmse_results[f'rmse_location_{loc_idx+1}']
+        ax.text(0.02, 0.98, f'RMSE: {rmse_value:.6f}', transform=ax.transAxes,
+               fontsize=10, va='top', ha='left',
+               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
         # Labels and formatting
         if row_idx == 2:  # Only bottom row gets x-label
             ax.set_xlabel('Time [s]')
@@ -333,7 +368,7 @@ for row_idx, val_level in enumerate(validation_level):
         if row_idx == 0:
             ax.set_title(f'{location_names[loc_idx]}', fontsize=14)
         if loc_idx == 0:
-            ax.text(-0.15, 0.5, f'Level {val_level}', transform=ax.transAxes,
+            ax.text(-0.15, 0.5, f'Level {val_level} ', transform=ax.transAxes,
                    fontsize=14, fontweight='bold', va='center', rotation=90)
         
         ax.grid(True, alpha=0.3)
@@ -345,30 +380,10 @@ for row_idx, val_level in enumerate(validation_level):
         ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}'))
 
 plt.tight_layout()
+plt.subplots_adjust(left=0.08)  # Add more space on the left for the Level labels
 plt.show()
 
-# ----------- RMSE CALCULATION FOR ALL LEVELS -----------
-print("=" * 60)
-print("RMSE")
-print("=" * 60)
 
-for val_level in validation_level:
-    data = all_val_data[val_level]
-    X_val_raw = data['X_val_raw']
-    X_sim_mean_denorm = data['X_sim_mean_denorm']
-    period_index = data['period_index']
-    
-    print(f"Level {val_level}:")
-    rmse_results = {}
-    for loc_idx in range(2):
-        y_pred = X_sim_mean_denorm[loc_idx, :]
-        y_true = X_val_raw[period_index, loc_idx, :]
-        y_pred_np = y_pred if isinstance(y_pred, np.ndarray) else y_pred.detach().numpy()
-        y_true_np = y_true if isinstance(y_true, np.ndarray) else y_true.detach().numpy()
-        rmse = np.sqrt(np.mean((y_pred_np - y_true_np)**2))
-        rmse_results[f'rmse_location_{loc_idx+1}'] = rmse
-        print(f"{location_names[loc_idx]} RMSE: {rmse:.6f}")
-    print("-" * 60)
         
 
 
